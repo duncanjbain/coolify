@@ -70,49 +70,102 @@
                 </div>
             </div>
             <div class="w-64">
-                @if (!$server->isLocalhost())
-                    @if ($server->settings->is_build_server)
-                        <x-forms.checkbox instantSave disabled id="server.settings.is_build_server"
+                @if ($server->isFunctional())
+                    @if (!$server->isLocalhost())
+                        <x-forms.checkbox instantSave id="server.settings.is_build_server"
                             label="Use it as a build server?" />
-                    @else
-                        <x-forms.checkbox instantSave
-                            helper="If you are using Cloudflare Tunnels, enable this. It will proxy all SSH requests to your server through Cloudflare.<br><span class='dark:text-warning'>Coolify does not install or set up Cloudflare (cloudflared) on your server.</span>"
-                            id="server.settings.is_cloudflare_tunnel" label="Cloudflare Tunnel" />
-                        @if ($server->isSwarm())
-                            <div class="pt-6"> Swarm support is experimental. </div>
-                        @endif
-                        @if ($server->settings->is_swarm_worker)
-                            <x-forms.checkbox disabled instantSave type="checkbox" id="server.settings.is_swarm_manager"
-                                helper="For more information, please read the documentation <a class='dark:text-white' href='https://coolify.io/docs/docker/swarm' target='_blank'>here</a>."
-                                label="Is it a Swarm Manager?" />
+                        <div class="flex items-center gap-1 pt-6">
+                            <h3 class="">Cloudflare Tunnels
+                            </h3>
+                            <x-helper class="inline-flex"
+                                helper="If you are using Cloudflare Tunnels, enable this. It will proxy all SSH requests to your server through Cloudflare.<br><span class='dark:text-warning'>Coolify does not install or set up Cloudflare (cloudflared) on your server.</span>" />
+                        </div>
+                        @if ($server->settings->is_cloudflare_tunnel)
+                            <x-forms.checkbox instantSave id="server.settings.is_cloudflare_tunnel" label="Enabled" />
                         @else
-                            <x-forms.checkbox instantSave type="checkbox" id="server.settings.is_swarm_manager"
-                                helper="For more information, please read the documentation <a class='dark:text-white' href='https://coolify.io/docs/docker/swarm' target='_blank'>here</a>."
-                                label="Is it a Swarm Manager?" />
+                            <x-modal-input buttonTitle="Configure" title="Cloudflare Tunnels">
+                                <livewire:server.configure-cloudflare-tunnels :server_id="$server->id" />
+                            </x-modal-input>
                         @endif
-                        @if ($server->settings->is_swarm_manager)
-                            <x-forms.checkbox disabled instantSave type="checkbox" id="server.settings.is_swarm_worker"
-                                helper="For more information, please read the documentation <a class='dark:text-white' href='https://coolify.io/docs/docker/swarm' target='_blank'>here</a>."
-                                label="Is it a Swarm Worker?" />
-                        @else
-                            <x-forms.checkbox instantSave type="checkbox" id="server.settings.is_swarm_worker"
-                                helper="For more information, please read the documentation <a class='dark:text-white' href='https://coolify.io/docs/docker/swarm' target='_blank'>here</a>."
-                                label="Is it a Swarm Worker?" />
+                        @if (!$server->isBuildServer())
+                            <h3 class="pt-6">Swarm <span class="text-xs text-neutral-500">(experimental)</span></h3>
+                            <div class="pb-4">Read the docs <a class='underline dark:text-white'
+                                    href='https://coolify.io/docs/knowledge-base/docker/swarm' target='_blank'>here</a>.
+                            </div>
+                            @if ($server->settings->is_swarm_worker)
+                                <x-forms.checkbox disabled instantSave type="checkbox"
+                                    id="server.settings.is_swarm_manager"
+                                    helper="For more information, please read the documentation <a class='dark:text-white' href='https://coolify.io/docs/knowledge-base/docker/swarm' target='_blank'>here</a>."
+                                    label="Is it a Swarm Manager?" />
+                            @else
+                                <x-forms.checkbox instantSave type="checkbox" id="server.settings.is_swarm_manager"
+                                    helper="For more information, please read the documentation <a class='dark:text-white' href='https://coolify.io/docs/knowledge-base/docker/swarm' target='_blank'>here</a>."
+                                    label="Is it a Swarm Manager?" />
+                            @endif
+
+                            @if ($server->settings->is_swarm_manager)
+                                <x-forms.checkbox disabled instantSave type="checkbox"
+                                    id="server.settings.is_swarm_worker"
+                                    helper="For more information, please read the documentation <a class='dark:text-white' href='https://coolify.io/docs/knowledge-base/docker/swarm' target='_blank'>here</a>."
+                                    label="Is it a Swarm Worker?" />
+                            @else
+                                <x-forms.checkbox instantSave type="checkbox" id="server.settings.is_swarm_worker"
+                                    helper="For more information, please read the documentation <a class='dark:text-white' href='https://coolify.io/docs/knowledge-base/docker/swarm' target='_blank'>here</a>."
+                                    label="Is it a Swarm Worker?" />
+                            @endif
                         @endif
                     @endif
+                @else
+                    <div class="flex items-center gap-1 pt-6">
+                        <h3 class="">Cloudflare Tunnels
+                        </h3>
+                        <x-helper class="inline-flex"
+                            helper="If you are using Cloudflare Tunnels, enable this. It will proxy all SSH requests to your server through Cloudflare.<br><span class='dark:text-warning'>Coolify does not install or set up Cloudflare (cloudflared) on your server.</span>" />
+                    </div>
+                    @if ($server->settings->is_cloudflare_tunnel)
+                        <x-forms.checkbox instantSave id="server.settings.is_cloudflare_tunnel" label="Enabled" />
+                    @else
+                        <x-modal-input buttonTitle="Configure" title="Cloudflare Tunnels">
+                            <livewire:server.configure-cloudflare-tunnels :server_id="$server->id" />
+                        </x-modal-input>
+                    @endif
                 @endif
+
             </div>
         </div>
 
         @if ($server->isFunctional())
             <h3 class="py-4">Settings</h3>
-            <div class="flex gap-2">
+            <div class="flex flex-wrap gap-2 sm:flex-nowrap">
                 <x-forms.input id="cleanup_after_percentage" label="Disk cleanup threshold (%)" required
                     helper="The disk cleanup task will run when the disk usage exceeds this threshold." />
                 <x-forms.input id="server.settings.concurrent_builds" label="Number of concurrent builds" required
                     helper="You can specify the number of simultaneous build processes/deployments that should run concurrently." />
                 <x-forms.input id="server.settings.dynamic_timeout" label="Deployment timeout (seconds)" required
                     helper="You can define the maximum duration for a deployment to run before timing it out." />
+            </div>
+            <div class="flex items-center gap-2">
+                <h3 class="py-4">Sentinel</h3>
+                @if ($server->isSentinelEnabled())
+                    <x-forms.button wire:click='restartSentinel'>Restart</x-forms.button>
+                @endif
+            </div>
+            <div class="w-64">
+                <x-forms.checkbox instantSave id="server.settings.is_metrics_enabled" label="Enable Metrics" />
+                {{-- <x-forms.checkbox instantSave id="server.settings.is_server_api_enabled" label="Enable Server API"
+                    helper="You need to open port 12172 on your firewall. This API will be used to gather data from your server, which makes Coolify a lot faster than relying on SSH connections." />
+                <x-forms.button wire:click='checkPortForServerApi'>Check Port for Server API</x-forms.button> --}}
+            </div>
+            <div class="pt-4">
+                <div class="flex flex-wrap gap-2 sm:flex-nowrap">
+                    <x-forms.input type="password" id="server.settings.metrics_token" label="Metrics token" required
+                        helper="Token for collector (Sentinel)." />
+                    <x-forms.input id="server.settings.metrics_refresh_rate_seconds" label="Metrics rate (seconds)"
+                        required
+                        helper="The interval for gathering metrics. Lower means more disk space will be used." />
+                    <x-forms.input id="server.settings.metrics_history_days" label="Metrics history (days)" required
+                        helper="How many days should the metrics data should be reserved." />
+                </div>
             </div>
         @endif
     </form>

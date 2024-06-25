@@ -2,11 +2,11 @@
     <div class="flex items-center gap-2">
         <h2>Webhooks</h2>
         <x-helper
-            helper="For more details goto our <a class='dark:text-white underline' href='https://coolify.io/docs/api/deploy-webhook' target='_blank'>docs</a>." />
+            helper="For more details goto our <a class='underline dark:text-white' href='https://coolify.io/docs/api-reference/deploy-webhook' target='_blank'>docs</a>." />
     </div>
     <div>
         <x-forms.input readonly
-            helper="See details in our <a target='_blank' class='dark:text-white underline' href='https://coolify.io/docs/api/authentication'>documentation</a>."
+            helper="See details in our <a target='_blank' class='underline dark:text-white' href='https://coolify.io/docs/api-reference/deploy-webhook'>documentation</a>."
             label="Deploy Webhook (auth required)" id="deploywebhook"></x-forms.input>
     </div>
     @if ($resource->type() === 'application')
@@ -39,6 +39,13 @@
                             helper="Need to set a secret to be able to use this webhook. It should match with the secret in Bitbucket."
                             label="Bitbucket Webhook Secret"
                             id="resource.manual_webhook_secret_bitbucket"></x-forms.input>
+                    </div>
+                    <div class="flex gap-2">
+                        <x-forms.input readonly label="Gitea" id="giteaManualWebhook"></x-forms.input>
+                        <x-forms.input type="password"
+                            helper="Need to set a secret to be able to use this webhook. It should match with the secret in Gitea."
+                            label="Gitea Webhook Secret"
+                            id="resource.manual_webhook_secret_gitea"></x-forms.input>
                     </div>
                     <x-forms.button type="submit">Save</x-forms.button>
                 </form>

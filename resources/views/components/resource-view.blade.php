@@ -1,7 +1,7 @@
 <div @class([
-    'transition-all duration-150 box-without-bg dark:bg-coolgray-100 bg-white group border-l-2 border-transparent',
-    'hover:border-coollabs cursor-pointer' => !$upgrade,
-    'hover:border-red-500 cursor-not-allowed' => $upgrade,
+    'transition-all duration-150 box-without-bg dark:bg-coolgray-100 bg-white group',
+    'hover:border-l-coollabs cursor-pointer' => !$upgrade,
+    'hover:border-l-red-500 cursor-not-allowed' => $upgrade,
 ]) @if (!$upgrade) wire:click={{ $wire }} @endif>
     <div class="flex items-center">
         {{ $logo }}
@@ -12,7 +12,7 @@
             @if ($upgrade)
                 <div>{{ $upgrade }}</div>
             @else
-                <div class="text-xs dark:text-neutral-500 group-hover:dark:text-neutral-300">
+                <div class="text-xs font-bold dark:text-neutral-500 group-hover:dark:text-neutral-300">
                     {{ $description }}
                 </div>
             @endif

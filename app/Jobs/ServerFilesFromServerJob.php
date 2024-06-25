@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Models\Application;
 use App\Models\ServiceApplication;
 use App\Models\ServiceDatabase;
 use Illuminate\Bus\Queueable;
@@ -11,16 +12,14 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 
-class ServerFilesFromServerJob implements ShouldQueue, ShouldBeEncrypted
+class ServerFilesFromServerJob implements ShouldBeEncrypted, ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    public function __construct(public ServiceApplication|ServiceDatabase|Application $resource) {}
 
-    public function __construct(public ServiceApplication|ServiceDatabase $service)
-    {
-    }
     public function handle()
     {
-        $this->service->getFilesFromServer(isInit: true);
+        $this->resource->getFilesFromServer(isInit: true);
     }
 }

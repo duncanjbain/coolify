@@ -9,8 +9,13 @@ use Visus\Cuid2\Cuid2;
 class Danger extends Component
 {
     public $resource;
+
     public $projectUuid;
+
     public $environmentName;
+
+    public bool $delete_configurations = true;
+
     public ?string $modalId = null;
 
     public function mount()
@@ -24,11 +29,13 @@ class Danger extends Component
     public function delete()
     {
         try {
+            // $this->authorize('delete', $this->resource);
             $this->resource->delete();
-            DeleteResourceJob::dispatch($this->resource);
+            DeleteResourceJob::dispatch($this->resource, $this->delete_configurations);
+
             return redirect()->route('project.resource.index', [
                 'project_uuid' => $this->projectUuid,
-                'environment_name' => $this->environmentName
+                'environment_name' => $this->environmentName,
             ]);
         } catch (\Throwable $e) {
             return handleError($e, $this);

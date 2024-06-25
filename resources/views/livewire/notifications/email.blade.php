@@ -1,4 +1,7 @@
 <div>
+    <x-slot:title>
+        Notifications | Coolify
+    </x-slot>
     <x-notification.navbar />
     <form wire:submit='submit' class="flex flex-col gap-4">
         <div class="flex items-center gap-2">
@@ -111,6 +114,8 @@
                 label="Application Deployments" />
             <x-forms.checkbox instantSave="saveModel" id="team.smtp_notifications_database_backups"
                 label="Backup Status" />
+            <x-forms.checkbox instantSave="saveModel" id="team.smtp_notifications_scheduled_tasks"
+                label="Scheduled Tasks Status" />
         </div>
     @endif
 </div>

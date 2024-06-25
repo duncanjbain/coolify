@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 class LocalFileVolume extends BaseModel
 {
     use HasFactory;
+
     protected $guarded = [];
 
     protected static function booted()
@@ -16,17 +17,47 @@ class LocalFileVolume extends BaseModel
             dispatch(new \App\Jobs\ServerStorageSaveJob($fileVolume));
         });
     }
+
     public function service()
     {
         return $this->morphTo('resource');
     }
+
+    public function deleteStorageOnServer()
+    {
+        $isService = data_get($this->resource, 'service');
+        if ($isService) {
+            $workdir = $this->resource->service->workdir();
+            $server = $this->resource->service->server;
+        } else {
+            $workdir = $this->resource->workdir();
+            $server = $this->resource->destination->server;
+        }
+        $commands = collect([
+            "cd $workdir",
+        ]);
+        $fs_path = data_get($this, 'fs_path');
+        if ($fs_path && $fs_path != '/' && $fs_path != '.' && $fs_path != '..') {
+            $commands->push("rm -rf $fs_path");
+        }
+        ray($commands);
+
+        return instant_remote_process($commands, $server);
+    }
+
     public function saveStorageOnServer()
     {
-        $workdir = $this->resource->service->workdir();
-        $server = $this->resource->service->server;
+        $isService = data_get($this->resource, 'service');
+        if ($isService) {
+            $workdir = $this->resource->service->workdir();
+            $server = $this->resource->service->server;
+        } else {
+            $workdir = $this->resource->workdir();
+            $server = $this->resource->destination->server;
+        }
         $commands = collect([
             "mkdir -p $workdir > /dev/null 2>&1 || true",
-            "cd $workdir"
+            "cd $workdir",
         ]);
         $is_directory = $this->is_directory;
         if ($is_directory) {
@@ -43,24 +74,33 @@ class LocalFileVolume extends BaseModel
         $content = data_get($fileVolume, 'content');
         if ($path->startsWith('.')) {
             $path = $path->after('.');
-            $path = $workdir . $path;
+            $path = $workdir.$path;
         }
         $isFile = instant_remote_process(["test -f $path && echo OK || echo NOK"], $server);
         $isDir = instant_remote_process(["test -d $path && echo OK || echo NOK"], $server);
         if ($isFile == 'OK' && $fileVolume->is_directory) {
-            throw new \Exception("The following file is a file on the server, but you are trying to mark it as a directory. Please delete the file on the server or mark it as directory.");
-        } else if ($isDir == 'OK' && !$fileVolume->is_directory) {
-            throw new \Exception("The following file is a directory on the server, but you are trying to mark it as a file. <br><br>Please delete the directory on the server or mark it as directory.");
+            throw new \Exception('The following file is a file on the server, but you are trying to mark it as a directory. Please delete the file on the server or mark it as directory.');
+        } elseif ($isDir == 'OK' && ! $fileVolume->is_directory) {
+            throw new \Exception('The following file is a directory on the server, but you are trying to mark it as a file. <br><br>Please delete the directory on the server or mark it as directory.');
         }
-        if (!$fileVolume->is_directory && $isDir == 'NOK') {
+        if (! $fileVolume->is_directory && $isDir == 'NOK') {
             if ($content) {
                 $content = base64_encode($content);
-                $commands->push("echo '$content' | base64 -d > $path");
+                $chmod = $fileVolume->chmod;
+                $chown = $fileVolume->chown;
+                $commands->push("echo '$content' | base64 -d | tee $path > /dev/null");
                 $commands->push("chmod +x $path");
+                if ($chown) {
+                    $commands->push("chown $chown $path");
+                }
+                if ($chmod) {
+                    $commands->push("chmod $chmod $path");
+                }
             }
-        } else if ($isDir == 'NOK' && $fileVolume->is_directory) {
+        } elseif ($isDir == 'NOK' && $fileVolume->is_directory) {
             $commands->push("mkdir -p $path > /dev/null 2>&1 || true");
         }
+
         return instant_remote_process($commands, $server);
     }
 }

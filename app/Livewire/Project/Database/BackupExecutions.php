@@ -2,22 +2,34 @@
 
 namespace App\Livewire\Project\Database;
 
-use Illuminate\Support\Facades\Storage;
+use App\Models\ScheduledDatabaseBackup;
 use Livewire\Component;
 
 class BackupExecutions extends Component
 {
-    public $backup;
+    public ?ScheduledDatabaseBackup $backup = null;
+
     public $executions = [];
+
     public $setDeletableBackup;
+
     public function getListeners()
     {
         $userId = auth()->user()->id;
+
         return [
             "echo-private:team.{$userId},BackupCreated" => 'refreshBackupExecutions',
-            "refreshBackupExecutions",
-            "deleteBackup"
+            'deleteBackup',
         ];
+    }
+
+    public function cleanupFailed()
+    {
+        if ($this->backup) {
+            $this->backup->executions()->where('status', 'failed')->delete();
+            $this->refreshBackupExecutions();
+            $this->dispatch('success', 'Failed backups cleaned up.');
+        }
     }
 
     public function deleteBackup($exeuctionId)
@@ -25,6 +37,7 @@ class BackupExecutions extends Component
         $execution = $this->backup->executions()->where('id', $exeuctionId)->first();
         if (is_null($execution)) {
             $this->dispatch('error', 'Backup execution not found.');
+
             return;
         }
         if ($execution->scheduledDatabaseBackup->database->getMorphClass() === 'App\Models\ServiceDatabase') {
@@ -36,35 +49,16 @@ class BackupExecutions extends Component
         $this->dispatch('success', 'Backup deleted.');
         $this->refreshBackupExecutions();
     }
-    public function download($exeuctionId)
+
+    public function download_file($exeuctionId)
     {
-        try {
-            $execution = $this->backup->executions()->where('id', $exeuctionId)->first();
-            if (is_null($execution)) {
-                $this->dispatch('error', 'Backup execution not found.');
-                return;
-            }
-            $filename = data_get($execution, 'filename');
-            if ($execution->scheduledDatabaseBackup->database->getMorphClass() === 'App\Models\ServiceDatabase') {
-                $server = $execution->scheduledDatabaseBackup->database->service->destination->server;
-            } else {
-                $server = $execution->scheduledDatabaseBackup->database->destination->server;
-            }
-            $privateKeyLocation = savePrivateKeyToFs($server);
-            $disk = Storage::build([
-                'driver' => 'sftp',
-                'host' => $server->ip,
-                'port' => $server->port,
-                'username' => $server->user,
-                'privateKey' => $privateKeyLocation,
-            ]);
-            return $disk->download($filename);
-        } catch (\Throwable $e) {
-            return handleError($e, $this);
-        }
+        return redirect()->route('download.backup', $exeuctionId);
     }
+
     public function refreshBackupExecutions(): void
     {
-        $this->executions = $this->backup->executions()->get()->sortByDesc('created_at');
+        if ($this->backup) {
+            $this->executions = $this->backup->executions()->get()->sortBy('created_at');
+        }
     }
 }

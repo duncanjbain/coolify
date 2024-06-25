@@ -9,17 +9,24 @@ use Spatie\Activitylog\Models\Activity;
 class NewActivityMonitor extends Component
 {
     public ?string $header = null;
+
     public $activityId;
+
     public $eventToDispatch = 'activityFinished';
+
+    public $eventData = null;
+
     public $isPollingActive = false;
 
     protected $activity;
+
     protected $listeners = ['newActivityMonitor' => 'newMonitorActivity'];
 
-    public function newMonitorActivity($activityId, $eventToDispatch = 'activityFinished')
+    public function newMonitorActivity($activityId, $eventToDispatch = 'activityFinished', $eventData = null)
     {
         $this->activityId = $activityId;
         $this->eventToDispatch = $eventToDispatch;
+        $this->eventData = $eventData;
 
         $this->hydrateActivity();
 
@@ -53,10 +60,15 @@ class NewActivityMonitor extends Component
                             $this->eventToDispatch::dispatch($teamId);
                         }
                     }
+
                     return;
                 }
-                $this->dispatch($this->eventToDispatch);
-                ray('Dispatched event: ' . $this->eventToDispatch);
+                if (! is_null($this->eventData)) {
+                    $this->dispatch($this->eventToDispatch, $this->eventData);
+                } else {
+                    $this->dispatch($this->eventToDispatch);
+                }
+                ray('Dispatched event: '.$this->eventToDispatch.' with data: '.$this->eventData);
             }
         }
     }

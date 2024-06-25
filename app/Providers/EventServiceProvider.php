@@ -22,14 +22,16 @@ class EventServiceProvider extends ServiceProvider
         \SocialiteProviders\Manager\SocialiteWasCalled::class => [
             \SocialiteProviders\Azure\AzureExtendSocialite::class.'@handle',
         ],
-          ProxyStarted::class => [
+        ProxyStarted::class => [
             ProxyStartedNotification::class,
         ],
     ];
+
     public function boot(): void
     {
         //
     }
+
     public function shouldDiscoverEvents(): bool
     {
         return false;

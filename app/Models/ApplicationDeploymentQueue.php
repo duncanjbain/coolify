@@ -9,17 +9,29 @@ class ApplicationDeploymentQueue extends Model
 {
     protected $guarded = [];
 
-    public function setStatus(string $status) {
+    public function setStatus(string $status)
+    {
         $this->update([
             'status' => $status,
         ]);
     }
+
     public function getOutput($name)
     {
-        if (!$this->logs) {
+        if (! $this->logs) {
             return null;
         }
+
         return collect(json_decode($this->logs))->where('name', $name)->first()?->output ?? null;
+    }
+
+    public function commitMessage()
+    {
+        if (empty($this->commit_message) || is_null($this->commit_message)) {
+            return null;
+        }
+
+        return str($this->commit_message)->trim()->limit(50)->value();
     }
 
     public function addLogEntry(string $message, string $type = 'stdout', bool $hidden = false)
@@ -29,7 +41,7 @@ class ApplicationDeploymentQueue extends Model
         }
         $message = str($message)->trim();
         if ($message->startsWith('╔')) {
-            $message = "\n" . $message;
+            $message = "\n".$message;
         }
         $newLogEntry = [
             'command' => null,

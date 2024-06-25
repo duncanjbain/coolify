@@ -1,7 +1,7 @@
 <?php
 
 const REDACTED = '<REDACTED>';
-const DATABASE_TYPES = ['postgresql', 'redis', 'mongodb', 'mysql', 'mariadb'];
+const DATABASE_TYPES = ['postgresql', 'redis', 'mongodb', 'mysql', 'mariadb', 'keydb', 'dragonfly', 'clickhouse'];
 const VALID_CRON_STRINGS = [
     'every_minute' => '* * * * *',
     'hourly' => '0 * * * *',
@@ -28,17 +28,18 @@ const DATABASE_DOCKER_IMAGES = [
     'neo4j',
     'influxdb',
     'clickhouse/clickhouse-server',
-    'supabase/postgres'
+    'supabase/postgres',
 ];
 const SPECIFIC_SERVICES = [
     'quay.io/minio/minio',
+    'svhd/logto',
 ];
 
 // Based on /etc/os-release
 const SUPPORTED_OS = [
     'ubuntu debian raspbian',
-    'centos fedora rhel ol rocky',
-    'sles opensuse-leap opensuse-tumbleweed'
+    'centos fedora rhel ol rocky amzn almalinux',
+    'sles opensuse-leap opensuse-tumbleweed',
 ];
 
 const SHARED_VARIABLE_TYPES = ['team', 'project', 'environment'];

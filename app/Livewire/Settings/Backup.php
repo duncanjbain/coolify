@@ -13,9 +13,13 @@ use Livewire\Component;
 class Backup extends Component
 {
     public InstanceSettings $settings;
+
     public $s3s;
+
     public StandalonePostgresql|null|array $database = [];
+
     public ScheduledDatabaseBackup|null|array $backup = [];
+
     public $executions = [];
 
     protected $rules = [
@@ -26,6 +30,7 @@ class Backup extends Component
         'database.postgres_password' => 'required',
 
     ];
+
     protected $validationAttributes = [
         'database.uuid' => 'uuid',
         'database.name' => 'name',
@@ -36,40 +41,45 @@ class Backup extends Component
 
     public function mount()
     {
-        $this->backup = $this->database?->scheduledBackups->first() ?? [];
+        $this->backup = $this->database?->scheduledBackups->first() ?? null;
         $this->executions = $this->backup?->executions ?? [];
     }
+
     public function add_coolify_database()
     {
-        $server = Server::find(0);
-        $out = instant_remote_process(['docker inspect coolify-db'], $server);
-        $envs = format_docker_envs_to_json($out);
-        $postgres_password = $envs['POSTGRES_PASSWORD'];
-        $postgres_user = $envs['POSTGRES_USER'];
-        $postgres_db = $envs['POSTGRES_DB'];
-        $this->database = StandalonePostgresql::create([
-            'id' => 0,
-            'name' => 'coolify-db',
-            'description' => 'Coolify database',
-            'postgres_user' => $postgres_user,
-            'postgres_password' => $postgres_password,
-            'postgres_db' => $postgres_db,
-            'status' => 'running',
-            'destination_type' => 'App\Models\StandaloneDocker',
-            'destination_id' => 0,
-        ]);
-        $this->backup = ScheduledDatabaseBackup::create([
-            'id' => 0,
-            'enabled' => true,
-            'save_s3' => false,
-            'frequency' => '0 0 * * *',
-            'database_id' => $this->database->id,
-            'database_type' => 'App\Models\StandalonePostgresql',
-            'team_id' => currentTeam()->id,
-        ]);
-        $this->database->refresh();
-        $this->backup->refresh();
-        $this->s3s = S3Storage::whereTeamId(0)->get();
+        try {
+            $server = Server::findOrFail(0);
+            $out = instant_remote_process(['docker inspect coolify-db'], $server);
+            $envs = format_docker_envs_to_json($out);
+            $postgres_password = $envs['POSTGRES_PASSWORD'];
+            $postgres_user = $envs['POSTGRES_USER'];
+            $postgres_db = $envs['POSTGRES_DB'];
+            $this->database = StandalonePostgresql::create([
+                'id' => 0,
+                'name' => 'coolify-db',
+                'description' => 'Coolify database',
+                'postgres_user' => $postgres_user,
+                'postgres_password' => $postgres_password,
+                'postgres_db' => $postgres_db,
+                'status' => 'running',
+                'destination_type' => 'App\Models\StandaloneDocker',
+                'destination_id' => 0,
+            ]);
+            $this->backup = ScheduledDatabaseBackup::create([
+                'id' => 0,
+                'enabled' => true,
+                'save_s3' => false,
+                'frequency' => '0 0 * * *',
+                'database_id' => $this->database->id,
+                'database_type' => 'App\Models\StandalonePostgresql',
+                'team_id' => currentTeam()->id,
+            ]);
+            $this->database->refresh();
+            $this->backup->refresh();
+            $this->s3s = S3Storage::whereTeamId(0)->get();
+        } catch (\Exception $e) {
+            return handleError($e, $this);
+        }
     }
 
     public function backup_now()
@@ -79,6 +89,7 @@ class Backup extends Component
         ));
         $this->dispatch('success', 'Backup queued. It will be available in a few minutes.');
     }
+
     public function submit()
     {
         $this->dispatch('success', 'Backup updated.');

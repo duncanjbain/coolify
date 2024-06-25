@@ -1,8 +1,12 @@
 <div>
+    <x-slot:title>
+        {{ data_get_str($application, 'name')->limit(10) }} > Configuration | Coolify
+    </x-slot>
     <h1>Configuration</h1>
+    <livewire:project.shared.configuration-checker :resource="$application" />
     <livewire:project.application.heading :application="$application" />
-    <div x-data="{ activeTab: window.location.hash ? window.location.hash.substring(1) : 'general' }" class="flex h-full pt-6">
-        <div class="flex flex-col gap-2 xl:w-48">
+    <div x-data="{ activeTab: window.location.hash ? window.location.hash.substring(1) : 'general' }" class="flex flex-col h-full gap-8 pt-6 sm:flex-row">
+        <div class="flex flex-col items-start gap-2 min-w-fit">
             <a class="menu-item" :class="activeTab === 'general' && 'menu-item-active'"
                 @click.prevent="activeTab = 'general'; window.location.hash = 'general'" href="#">General</a>
             @if ($application->destination->server->isSwarm())
@@ -18,7 +22,7 @@
                     href="#">Environment
                     Variables</a>
             @endif
-            @if ($application->build_pack !== 'static' && $application->build_pack !== 'dockercompose')
+            @if ($application->build_pack !== 'static')
                 <a class="menu-item" :class="activeTab === 'storages' && 'menu-item-active'"
                     @click.prevent="activeTab = 'storages'; window.location.hash = 'storages'" href="#">Storages
                 </a>
@@ -27,7 +31,7 @@
                 <a class="menu-item" :class="activeTab === 'source' && 'menu-item-active'"
                     @click.prevent="activeTab = 'source'; window.location.hash = 'source'" href="#">Source</a>
             @endif
-            <a  class="menu-item" :class="activeTab === 'servers' && 'menu-item-active'" class="flex items-center gap-2"
+            <a class="menu-item" :class="activeTab === 'servers' && 'menu-item-active'" class="flex items-center gap-2"
                 @click.prevent="activeTab = 'servers'; window.location.hash = 'servers'" href="#">Servers
                 @if (str($application->status)->contains('degraded'))
                     <span title="Some servers are unavailable">
@@ -70,6 +74,9 @@
                 @click.prevent="activeTab = 'resource-operations'; window.location.hash = 'resource-operations'"
                 href="#">Resource Operations
             </a>
+            <a class="menu-item" :class="activeTab === 'metrics' && 'menu-item-active'"
+                @click.prevent="activeTab = 'metrics'; window.location.hash = 'metrics'" href="#">Metrics
+            </a>
             <a class="menu-item" :class="activeTab === 'tags' && 'menu-item-active'"
                 @click.prevent="activeTab = 'tags'; window.location.hash = 'tags'" href="#">Tags
             </a>
@@ -77,7 +84,7 @@
                 @click.prevent="activeTab = 'danger'; window.location.hash = 'danger'" href="#">Danger Zone
             </a>
         </div>
-        <div class="w-full pl-8">
+        <div class="w-full">
             <div x-cloak x-show="activeTab === 'general'" class="h-full">
                 <livewire:project.application.general :application="$application" />
             </div>
@@ -121,6 +128,9 @@
             </div>
             <div x-cloak x-show="activeTab === 'resource-operations'">
                 <livewire:project.shared.resource-operations :resource="$application" />
+            </div>
+            <div x-cloak x-show="activeTab === 'metrics'">
+                <livewire:project.shared.metrics :resource="$application" />
             </div>
             <div x-cloak x-show="activeTab === 'tags'">
                 <livewire:project.shared.tags :resource="$application" />

@@ -8,7 +8,9 @@ use Livewire\Component;
 class ShowPrivateKey extends Component
 {
     public Server $server;
+
     public $privateKeys;
+
     public $parameters;
 
     public function setPrivateKey($newPrivateKeyId)
@@ -17,17 +19,18 @@ class ShowPrivateKey extends Component
             $oldPrivateKeyId = $this->server->private_key_id;
             refresh_server_connection($this->server->privateKey);
             $this->server->update([
-                'private_key_id' => $newPrivateKeyId
+                'private_key_id' => $newPrivateKeyId,
             ]);
             $this->server->refresh();
             refresh_server_connection($this->server->privateKey);
             $this->checkConnection();
         } catch (\Throwable $e) {
             $this->server->update([
-                'private_key_id' => $oldPrivateKeyId
+                'private_key_id' => $oldPrivateKeyId,
             ]);
             $this->server->refresh();
             refresh_server_connection($this->server->privateKey);
+
             return handleError($e, $this);
         }
     }
@@ -35,11 +38,13 @@ class ShowPrivateKey extends Component
     public function checkConnection()
     {
         try {
-            $uptime = $this->server->validateConnection();
+            ['uptime' => $uptime, 'error' => $error] = $this->server->validateConnection();
             if ($uptime) {
                 $this->dispatch('success', 'Server is reachable.');
             } else {
-                $this->dispatch('error', 'Server is not reachable.<br>Please validate your configuration and connection.<br><br>Check this <a target="_blank" class="underline" href="https://coolify.io/docs/server/openssh#openssh">documentation</a> for further help.');
+                ray($error);
+                $this->dispatch('error', 'Server is not reachable.<br>Please validate your configuration and connection.<br><br>Check this <a target="_blank" class="underline" href="https://coolify.io/docs/knowledge-base/server/openssh">documentation</a> for further help.');
+
                 return;
             }
         } catch (\Throwable $e) {

@@ -4,18 +4,18 @@ namespace App\Actions\Database;
 
 use App\Models\StandaloneRedis;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
-use Symfony\Component\Yaml\Yaml;
 use Lorisleiva\Actions\Concerns\AsAction;
+use Symfony\Component\Yaml\Yaml;
 
 class StartRedis
 {
     use AsAction;
 
     public StandaloneRedis $database;
-    public array $commands = [];
-    public string $configuration_dir;
 
+    public array $commands = [];
+
+    public string $configuration_dir;
 
     public function handle(StandaloneRedis $database)
     {
@@ -24,7 +24,7 @@ class StartRedis
         $startCommand = "redis-server --requirepass {$this->database->redis_password} --appendonly yes";
 
         $container_name = $this->database->uuid;
-        $this->configuration_dir = database_configuration_dir() . '/' . $container_name;
+        $this->configuration_dir = database_configuration_dir().'/'.$container_name;
 
         $this->commands = [
             "echo 'Starting {$database->name}.'",
@@ -32,12 +32,12 @@ class StartRedis
         ];
 
         $persistent_storages = $this->generate_local_persistent_volumes();
+        $persistent_file_volumes = $this->database->fileStorages()->get();
         $volume_names = $this->generate_local_persistent_volumes_only_volume_names();
         $environment_variables = $this->generate_environment_variables();
         $this->add_custom_redis();
 
         $docker_compose = [
-            'version' => '3.8',
             'services' => [
                 $container_name => [
                     'image' => $this->database->image,
@@ -55,12 +55,12 @@ class StartRedis
                         'test' => [
                             'CMD-SHELL',
                             'redis-cli',
-                            'ping'
+                            'ping',
                         ],
                         'interval' => '5s',
                         'timeout' => '5s',
                         'retries' => 10,
-                        'start_period' => '5s'
+                        'start_period' => '5s',
                     ],
                     'mem_limit' => $this->database->limits_memory,
                     'memswap_limit' => $this->database->limits_memory_swap,
@@ -68,27 +68,27 @@ class StartRedis
                     'mem_reservation' => $this->database->limits_memory_reservation,
                     'cpus' => (float) $this->database->limits_cpus,
                     'cpu_shares' => $this->database->limits_cpu_shares,
-                ]
+                ],
             ],
             'networks' => [
                 $this->database->destination->network => [
                     'external' => true,
                     'name' => $this->database->destination->network,
                     'attachable' => true,
-                ]
-            ]
+                ],
+            ],
         ];
-        if (!is_null($this->database->limits_cpuset)) {
+        if (! is_null($this->database->limits_cpuset)) {
             data_set($docker_compose, "services.{$container_name}.cpuset", $this->database->limits_cpuset);
         }
         if ($this->database->destination->server->isLogDrainEnabled() && $this->database->isLogDrainEnabled()) {
             $docker_compose['services'][$container_name]['logging'] = [
                 'driver' => 'fluentd',
                 'options' => [
-                    'fluentd-address' => "tcp://127.0.0.1:24224",
-                    'fluentd-async' => "true",
-                    'fluentd-sub-second-precision' => "true",
-                ]
+                    'fluentd-address' => 'tcp://127.0.0.1:24224',
+                    'fluentd-async' => 'true',
+                    'fluentd-sub-second-precision' => 'true',
+                ],
             ];
         }
         if (count($this->database->ports_mappings_array) > 0) {
@@ -97,13 +97,18 @@ class StartRedis
         if (count($persistent_storages) > 0) {
             $docker_compose['services'][$container_name]['volumes'] = $persistent_storages;
         }
+        if (count($persistent_file_volumes) > 0) {
+            $docker_compose['services'][$container_name]['volumes'] = $persistent_file_volumes->map(function ($item) {
+                return "$item->fs_path:$item->mount_path";
+            })->toArray();
+        }
         if (count($volume_names) > 0) {
             $docker_compose['volumes'] = $volume_names;
         }
-        if (!is_null($this->database->redis_conf)) {
+        if (! is_null($this->database->redis_conf) || ! empty($this->database->redis_conf)) {
             $docker_compose['services'][$container_name]['volumes'][] = [
                 'type' => 'bind',
-                'source' => $this->configuration_dir . '/redis.conf',
+                'source' => $this->configuration_dir.'/redis.conf',
                 'target' => '/usr/local/etc/redis/redis.conf',
                 'read_only' => true,
             ];
@@ -111,13 +116,14 @@ class StartRedis
         }
         $docker_compose = Yaml::dump($docker_compose, 10);
         $docker_compose_base64 = base64_encode($docker_compose);
-        $this->commands[] = "echo '{$docker_compose_base64}' | base64 -d > $this->configuration_dir/docker-compose.yml";
+        $this->commands[] = "echo '{$docker_compose_base64}' | base64 -d | tee $this->configuration_dir/docker-compose.yml > /dev/null";
         $readme = generate_readme_file($this->database->name, now());
         $this->commands[] = "echo '{$readme}' > $this->configuration_dir/README.md";
         $this->commands[] = "echo 'Pulling {$database->image} image.'";
         $this->commands[] = "docker compose -f $this->configuration_dir/docker-compose.yml pull";
         $this->commands[] = "docker compose -f $this->configuration_dir/docker-compose.yml up -d";
         $this->commands[] = "echo 'Database started.'";
+
         return remote_process($this->commands, $database->destination->server, callEventOnFinish: 'DatabaseStatusChanged');
     }
 
@@ -125,9 +131,14 @@ class StartRedis
     {
         $local_persistent_volumes = [];
         foreach ($this->database->persistentStorages as $persistentStorage) {
-            $volume_name = $persistentStorage->host_path ?? $persistentStorage->name;
-            $local_persistent_volumes[] = $volume_name . ':' . $persistentStorage->mount_path;
+            if ($persistentStorage->host_path !== '' && $persistentStorage->host_path !== null) {
+                $local_persistent_volumes[] = $persistentStorage->host_path.':'.$persistentStorage->mount_path;
+            } else {
+                $volume_name = $persistentStorage->name;
+                $local_persistent_volumes[] = $volume_name.':'.$persistentStorage->mount_path;
+            }
         }
+
         return $local_persistent_volumes;
     }
 
@@ -144,6 +155,7 @@ class StartRedis
                 'external' => false,
             ];
         }
+
         return $local_persistent_volumes_names;
     }
 
@@ -154,15 +166,16 @@ class StartRedis
             $environment_variables->push("$env->key=$env->real_value");
         }
 
-        if ($environment_variables->filter(fn ($env) => Str::of($env)->contains('REDIS_PASSWORD'))->isEmpty()) {
+        if ($environment_variables->filter(fn ($env) => str($env)->contains('REDIS_PASSWORD'))->isEmpty()) {
             $environment_variables->push("REDIS_PASSWORD={$this->database->redis_password}");
         }
 
         return $environment_variables->all();
     }
+
     private function add_custom_redis()
     {
-        if (is_null($this->database->redis_conf)) {
+        if (is_null($this->database->redis_conf) || empty($this->database->redis_conf)) {
             return;
         }
         $filename = 'redis.conf';

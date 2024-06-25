@@ -1,9 +1,9 @@
 <div>
     <div class="flex items-end gap-2">
         <h1>Create a new Application</h1>
-        <x-forms.button wire:click="saveFromRedirect('source.new')" class="group-hover:dark:text-white">
-            + Add New GitHub App
-        </x-forms.button>
+        <x-modal-input buttonTitle="+ Add GitHub App" title="New GitHub App">
+            <livewire:source.github.create />
+        </x-modal-input>
         @if ($repositories->count() > 0)
             <a target="_blank" class="flex hover:no-underline" href="{{ get_installation_path($github_app) }}">
                 <x-forms.button>
@@ -14,42 +14,38 @@
         @endif
     </div>
     <div class="pb-4">Deploy any public or private Git repositories through a GitHub App.</div>
-    @if ($github_apps->count() !== 0)
-        <div class="flex flex-col gap-2 pt-10">
-            @if ($current_step === 'github_apps')
-                <ul class="pb-10 steps">
-                    <li class="step step-secondary">Select a GitHub App</li>
-                    <li class="step">Select a Repository, Branch & Save</li>
-                </ul>
-                <div class="flex flex-col justify-center gap-2 text-left xl:flex-row">
-                    @foreach ($github_apps as $ghapp)
-                        <div class="gap-2 py-4 cursor-pointer group hover:bg-coollabs bg-coolgray-200"
-                            wire:click.prevent="loadRepositories({{ $ghapp->id }})" wire:key="{{ $ghapp->id }}">
-                            <div class="flex mr-4">
-                                <div class="flex flex-col mx-6">
-                                    <div class="group-hover:dark:text-white">
-                                        {{ data_get($ghapp, 'name') }}
-                                    </div>
-                                    <div class="text-xs text-gray-400 group-hover:dark:text-white">
-                                        {{ data_get($ghapp, 'html_url') }}</div>
 
+    @if ($github_apps->count() !== 0)
+        <h2 class="pt-4 pb-4">Select a Github App</h2>
+        <div class="flex flex-col gap-2">
+            @if ($current_step === 'github_apps')
+                <div class="flex flex-col justify-center gap-2 text-left">
+                    @foreach ($github_apps as $ghapp)
+                        <div class="flex">
+                            <div class="w-full gap-2 py-4 bg-white cursor-pointer group hover:bg-coollabs dark:bg-coolgray-200 box"
+                                wire:click.prevent="loadRepositories({{ $ghapp->id }})"
+                                wire:key="{{ $ghapp->id }}">
+                                <div class="flex mr-4">
+                                    <div class="flex flex-col mx-6">
+                                        <div class="box-title">
+                                            {{ data_get($ghapp, 'name') }}
+                                        </div>
+                                        <div class="box-description">
+                                            {{ data_get($ghapp, 'html_url') }}</div>
+                                    </div>
                                 </div>
-                                <span wire:target="loadRepositories({{ $ghapp->id }})" wire:loading.delay
-                                    class="loading loading-xs dark:text-warning loading-spinner"></span>
+                            </div>
+                            <div class="flex flex-col items-center justify-center">
+                                <x-loading wire:loading wire:target="loadRepositories({{ $ghapp->id }})" />
                             </div>
                         </div>
                     @endforeach
                 </div>
             @endif
             @if ($current_step === 'repository')
-                <ul class="pb-10 steps">
-                    <li class="step step-secondary">Select a GitHub App</li>
-                    <li class="step step-secondary">Select a Repository, Branch & Save</li>
-                </ul>
                 @if ($repositories->count() > 0)
                     <div class="flex items-end gap-2">
-                        <x-forms.select class="w-full" label="Repository URL" helper="{!! __('repository.url') !!}"
-                            wire:model="selected_repository_id">
+                        <x-forms.select class="w-full" label="Repository" wire:model="selected_repository_id">
                             @foreach ($repositories as $repo)
                                 @if ($loop->first)
                                     <option selected value="{{ data_get($repo, 'id') }}">
@@ -62,7 +58,6 @@
                             @endforeach
                         </x-forms.select>
                         <x-forms.button wire:click.prevent="loadBranches"> Load Repository </x-forms.button>
-
                     </div>
                 @else
                     <div>No repositories found. Check your GitHub App configuration.</div>

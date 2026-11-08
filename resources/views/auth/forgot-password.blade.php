@@ -1,43 +1,45 @@
 <x-layout-simple>
-    <div class="flex items-center justify-center h-screen">
-        <div>
-            <div class="flex flex-col items-center pb-8">
-                <a href="{{ route('dashboard') }}">
-                    <div class="text-5xl font-bold tracking-tight text-center dark:text-white">Coolify</div>
-                </a>
-                {{-- <x-version /> --}}
-            </div>
+    <x-auth.shell title="Coolify"
+        description="Enter your account email and we’ll send you a secure reset link.">
+        <div class="flex flex-col gap-4">
+            @if (session('status'))
+                <x-auth.alert type="success">{{ session('status') }}</x-auth.alert>
+            @endif
 
-            <div class="flex items-center gap-2">
-                <h1>{{ __('auth.forgot_password') }}</h1>
-            </div>
-            <div>
-                @if (is_transactional_emails_active())
-                    <form action="/forgot-password" method="POST" class="flex flex-col gap-2">
-                        @csrf
-                        <x-forms.input required type="email" name="email" label="{{ __('input.email') }}" autofocus />
-                        <x-forms.button type="submit">{{ __('auth.forgot_password_send_email') }}</x-forms.button>
-                    </form>
-                @else
-                    <div>Transactional emails are not active on this instance.</div>
-                    <div>See how to set it in our <a class="dark:text-white" target="_blank"
-                            href="{{ config('constants.docs.base_url') }}">docs</a>, or how to
-                        manually reset password.
-                    </div>
-                @endif
-                @if ($errors->any())
-                    <div class="text-xs text-center text-error">
+            @if ($errors->any())
+                <x-auth.alert type="error">
+                    <div class="flex flex-col gap-1">
                         @foreach ($errors->all() as $error)
                             <p>{{ $error }}</p>
                         @endforeach
                     </div>
-                @endif
-                @if (session('status'))
-                    <div class="mb-4 text-xs font-medium text-green-600">
-                        {{ session('status') }}
-                    </div>
-                @endif
-            </div>
+                </x-auth.alert>
+            @endif
+
+            @if (is_transactional_emails_enabled())
+                <form action="/forgot-password" method="POST" class="flex flex-col gap-4">
+                    @csrf
+                    <x-forms.input required type="email" name="email" autocomplete="email" autofocus
+                        label="{{ __('input.email') }}" />
+                    <x-forms.button class="w-full justify-center" type="submit" isHighlighted>
+                        {{ __('auth.forgot_password_send_email') }}
+                    </x-forms.button>
+                </form>
+            @else
+                <x-auth.alert type="warning">
+                    <p class="font-medium">Transactional email is not configured</p>
+                    <p class="mt-0.5 text-black/70 dark:text-white/70">
+                        Configure email delivery or follow the
+                        <a class="font-medium underline underline-offset-2" target="_blank" rel="noopener noreferrer"
+                            href="{{ config('constants.urls.docs') }}">manual reset guide</a>.
+                    </p>
+                </x-auth.alert>
+            @endif
         </div>
-    </div>
+
+        <x-slot:footer>
+            <span>Remember your password?</span>
+            <a href="/login" class="auth-text-link">Back to login</a>
+        </x-slot:footer>
+    </x-auth.shell>
 </x-layout-simple>

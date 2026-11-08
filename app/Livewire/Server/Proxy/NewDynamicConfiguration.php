@@ -2,73 +2,95 @@
 
 namespace App\Livewire\Server\Proxy;
 
+use App\Enums\ProxyTypes;
 use App\Models\Server;
-use Illuminate\Routing\Route;
+use App\Rules\ValidProxyConfigFilename;
+use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
 use Symfony\Component\Yaml\Yaml;
 
 class NewDynamicConfiguration extends Component
 {
+    use AuthorizesRequests;
+
     public string $fileName = '';
+
     public string $value = '';
+
     public bool $newFile = false;
-    public Server $server;
+
+    public ?Server $server = null;
+
+    #[Locked]
     public $server_id;
+
+    #[Locked]
     public $parameters = [];
+
     public function mount()
     {
+        $this->server = Server::ownedByCurrentTeam()->whereId($this->server_id)->first();
+        if (is_null($this->server)) {
+            $this->redirectRoute('server.index');
+
+            return;
+        }
         $this->parameters = get_route_parameters();
         if ($this->fileName !== '') {
             $this->fileName = str_replace('|', '.', $this->fileName);
         }
     }
+
     public function addDynamicConfiguration()
     {
         try {
-            $this->validate([
-                'fileName' => 'required',
-                'value' => 'required',
-            ]);
-            if (data_get($this->parameters, 'server_uuid')) {
-                $this->server = Server::ownedByCurrentTeam()->whereUuid(data_get($this->parameters, 'server_uuid'))->first();
-            }
-            if (!is_null($this->server_id)) {
-                $this->server = Server::ownedByCurrentTeam()->whereId($this->server_id)->first();
-            }
             if (is_null($this->server)) {
                 return redirect()->route('server.index');
             }
+            $this->authorize('update', $this->server);
+            $this->validate([
+                'fileName' => ['required', new ValidProxyConfigFilename],
+                'value' => 'required',
+            ]);
+
+            validateFilenameSafe($this->fileName, 'proxy configuration filename');
+
             $proxy_type = $this->server->proxyType();
-            if ($proxy_type === 'TRAEFIK_V2') {
-                if (!str($this->fileName)->endsWith('.yaml') && !str($this->fileName)->endsWith('.yml')) {
+            if ($proxy_type === ProxyTypes::TRAEFIK->value) {
+                if (! str($this->fileName)->endsWith('.yaml') && ! str($this->fileName)->endsWith('.yml')) {
                     $this->fileName = "{$this->fileName}.yaml";
                 }
                 if ($this->fileName === 'coolify.yaml') {
                     $this->dispatch('error', 'File name is reserved.');
+
                     return;
                 }
-            } else if ($proxy_type === 'CADDY') {
-                if (!str($this->fileName)->endsWith('.caddy')) {
+            } elseif ($proxy_type === 'CADDY') {
+                if (! str($this->fileName)->endsWith('.caddy')) {
                     $this->fileName = "{$this->fileName}.caddy";
                 }
             }
             $proxy_path = $this->server->proxyPath();
             $file = "{$proxy_path}/dynamic/{$this->fileName}";
+            $escapedFile = escapeshellarg($file);
+
             if ($this->newFile) {
-                $exists = instant_remote_process(["test -f $file && echo 1 || echo 0"], $this->server);
+                $exists = instant_remote_process(["test -f {$escapedFile} && echo 1 || echo 0"], $this->server);
                 if ($exists == 1) {
                     $this->dispatch('error', 'File already exists');
+
                     return;
                 }
             }
-            if ($proxy_type === 'TRAEFIK_V2') {
+            if ($proxy_type === ProxyTypes::TRAEFIK->value) {
                 $yaml = Yaml::parse($this->value);
                 $yaml = Yaml::dump($yaml, 10, 2);
                 $this->value = $yaml;
             }
             $base64_value = base64_encode($this->value);
             instant_remote_process([
-                "echo '{$base64_value}' | base64 -d > {$file}",
+                "echo '{$base64_value}' | base64 -d | tee {$escapedFile} > /dev/null",
             ], $this->server);
             if ($proxy_type === 'CADDY') {
                 $this->server->reloadCaddy();
@@ -80,6 +102,7 @@ class NewDynamicConfiguration extends Component
             return handleError($e, $this);
         }
     }
+
     public function render()
     {
         return view('livewire.server.proxy.new-dynamic-configuration');

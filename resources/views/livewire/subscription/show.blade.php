@@ -1,5 +1,10 @@
-<div>
-    <h1>Subscription</h1>
-    <div class="subtitle">Here you can see and manage your subscription.</div>
+<div class="application-settings-form w-full max-w-none">
+    <x-slot:title>
+        Subscription | Coolify
+    </x-slot>
+
+    <x-dashboard.navbar section="subscription" title="Subscription"
+        subtitle="Plan and billing for Coolify Cloud" />
+
     <livewire:subscription.actions />
 </div>

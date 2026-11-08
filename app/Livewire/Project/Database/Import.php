@@ -2,138 +2,106 @@
 
 namespace App\Livewire\Project\Database;
 
-use Exception;
-use Livewire\Component;
-use Livewire\WithFileUploads;
-use App\Models\Server;
-use App\Models\StandaloneMariadb;
-use App\Models\StandaloneMongodb;
-use App\Models\StandaloneMysql;
-use App\Models\StandalonePostgresql;
+use App\Models\ServiceDatabase;
+use App\Models\StandaloneClickhouse;
+use App\Models\StandaloneDragonfly;
+use App\Models\StandaloneKeydb;
 use App\Models\StandaloneRedis;
-use Illuminate\Support\Facades\Storage;
+use App\Traits\ListensToTeamChannel;
+use Illuminate\Contracts\View\View;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Support\Facades\Auth;
+use Livewire\Attributes\Locked;
+use Livewire\Component;
 
 class Import extends Component
 {
-    use WithFileUploads;
+    use AuthorizesRequests;
+    use ListensToTeamChannel;
 
-    public $file;
-    public $resource;
-    public $parameters;
-    public $containers;
-    public bool $validated = true;
-    public bool $scpInProgress = false;
-    public bool $importRunning = false;
-    public string $validationMsg = '';
-    public Server $server;
-    public string $container;
-    public array $importCommands = [];
-    public string $postgresqlRestoreCommand = 'pg_restore -U $POSTGRES_USER -d $POSTGRES_DB';
-    public string $mysqlRestoreCommand = 'mysql -u $MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE';
-    public string $mariadbRestoreCommand = 'mariadb -u $MARIADB_USER -p$MARIADB_PASSWORD $MARIADB_DATABASE';
+    #[Locked]
+    public ?int $resourceId = null;
 
-    public function getListeners()
+    #[Locked]
+    public ?string $resourceType = null;
+
+    public string $resourceStatus = '';
+
+    public string $resourceUuid = '';
+
+    public bool $unsupported = false;
+
+    public function getListeners(): array
     {
-        $userId = auth()->user()->id;
+        $listeners = ['databaseUpdated' => 'refreshStatus'];
+
+        $user = Auth::user();
+        if (! $user) {
+            return $listeners;
+        }
+
+        $listeners["echo-private:user.{$user->id},DatabaseStatusChanged"] = 'refreshStatus';
+
         return [
-            "echo-private:user.{$userId},DatabaseStatusChanged" => '$refresh',
+            ...$listeners,
+            ...$this->teamChannelListeners(['ServiceChecked' => 'refreshStatus']),
         ];
     }
-    public function mount()
+
+    public function mount(Model $resource): void
     {
-        $this->parameters = get_route_parameters();
-        $this->getContainers();
+        $this->authorize('view', $resource);
+
+        $this->resourceId = $resource->id;
+        $this->resourceType = get_class($resource);
+
+        $this->refreshStatus();
     }
 
-    public function getContainers()
+    public function refreshStatus(): void
     {
-        $this->containers = collect();
-        if (!data_get($this->parameters, 'database_uuid')) {
-            abort(404);
-        }
+        $resource = $this->resolveStoredResource();
+        $this->authorize('view', $resource);
 
-        $resource = StandalonePostgresql::where('uuid', $this->parameters['database_uuid'])->first();
-        if (is_null($resource)) {
-            $resource = StandaloneRedis::where('uuid', $this->parameters['database_uuid'])->first();
-            if (is_null($resource)) {
-                $resource = StandaloneMongodb::where('uuid', $this->parameters['database_uuid'])->first();
-                if (is_null($resource)) {
-                    $resource = StandaloneMysql::where('uuid', $this->parameters['database_uuid'])->first();
-                    if (is_null($resource)) {
-                        $resource = StandaloneMariadb::where('uuid', $this->parameters['database_uuid'])->first();
-                        if (is_null($resource)) {
-                            abort(404);
-                        }
-                    }
-                }
-            }
-        }
-        $this->resource = $resource;
-        $this->server = $this->resource->destination->server;
-        $this->container = $this->resource->uuid;
-        if (str(data_get($this, 'resource.status'))->startsWith('running')) {
-            $this->containers->push($this->container);
-        }
-
-        if ($this->containers->count() > 1) {
-            $this->validated = false;
-            $this->validationMsg = 'The database service has more than one container running. Cannot import.';
-        }
-
-        if (
-            $this->resource->getMorphClass() == 'App\Models\StandaloneRedis'
-            || $this->resource->getMorphClass() == 'App\Models\StandaloneMongodb'
-        ) {
-            $this->validated = false;
-            $this->validationMsg = 'This database type is not currently supported.';
-        }
+        $resource->refresh();
+        $this->resourceUuid = $resource->uuid;
+        $this->resourceStatus = $resource->status ?? '';
+        $this->unsupported = $this->isUnsupportedResource($resource);
     }
 
-    public function runImport()
+    public function render(): View
     {
-        $this->validate([
-            'file' => 'required|file|max:102400'
+        return view('livewire.project.database.import', [
+            'resource' => $this->resolveStoredResource(),
         ]);
+    }
 
-        $this->importRunning = true;
-        $this->scpInProgress = true;
+    private function resolveStoredResource(): Model
+    {
+        return $this->resourceType::find($this->resourceId) ?? abort(404);
+    }
 
-        try {
-            $uploadedFilename = $this->file->store('backup-import');
-            $path = Storage::path($uploadedFilename);
-            $tmpPath = '/tmp/' . basename($uploadedFilename);
-
-            // SCP the backup file to the server.
-            instant_scp($path, $tmpPath, $this->server);
-            $this->scpInProgress = false;
-
-            $this->importCommands[] = "docker cp {$tmpPath} {$this->container}:{$tmpPath}";
-
-            switch ($this->resource->getMorphClass()) {
-                case 'App\Models\StandaloneMariadb':
-                    $this->importCommands[] = "docker exec {$this->container} sh -c '{$this->mariadbRestoreCommand} < {$tmpPath}'";
-                    $this->importCommands[] = "rm {$tmpPath}";
-                    break;
-                case 'App\Models\StandaloneMysql':
-                    $this->importCommands[] = "docker exec {$this->container} sh -c '{$this->mysqlRestoreCommand} < {$tmpPath}'";
-                    $this->importCommands[] = "rm {$tmpPath}";
-                    break;
-                case 'App\Models\StandalonePostgresql':
-                    $this->importCommands[] = "docker exec {$this->container} sh -c '{$this->postgresqlRestoreCommand} {$tmpPath}'";
-                    $this->importCommands[] = "rm {$tmpPath}";
-                    break;
-            }
-
-            $this->importCommands[] = "docker exec {$this->container} sh -c 'rm {$tmpPath}'";
-            $this->importCommands[] = "docker exec {$this->container} sh -c 'echo \"Import finished with exit code $?\"'";
-
-            if (!empty($this->importCommands)) {
-                $activity = remote_process($this->importCommands, $this->server, ignore_errors: true);
-                $this->dispatch('activityMonitor', $activity->id);
-            }
-        } catch (\Throwable $e) {
-            $this->validated = false;
-            $this->validationMsg = $e->getMessage();
+    private function isUnsupportedResource(object $resource): bool
+    {
+        if (
+            $resource instanceof StandaloneRedis ||
+            $resource instanceof StandaloneKeydb ||
+            $resource instanceof StandaloneDragonfly ||
+            $resource instanceof StandaloneClickhouse
+        ) {
+            return true;
         }
+
+        if ($resource instanceof ServiceDatabase) {
+            $dbType = $resource->databaseType();
+
+            return str_contains($dbType, 'redis') ||
+                str_contains($dbType, 'keydb') ||
+                str_contains($dbType, 'dragonfly') ||
+                str_contains($dbType, 'clickhouse');
+        }
+
+        return false;
     }
 }

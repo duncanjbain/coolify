@@ -2,146 +2,213 @@
 
 namespace App\Console;
 
-use App\Jobs\CheckLogDrainContainerJob;
+use App\Jobs\ApiTokenExpirationWarningJob;
+use App\Jobs\CheckForUpdatesJob;
+use App\Jobs\CheckHelperImageJob;
+use App\Jobs\CheckMissingDatabaseBackupsJob;
+use App\Jobs\CheckMissingVolumeBackupsJob;
 use App\Jobs\CleanupInstanceStuffsJob;
-use App\Jobs\DatabaseBackupJob;
-use App\Jobs\ScheduledTaskJob;
-use App\Jobs\InstanceAutoUpdateJob;
-use App\Jobs\ContainerStatusJob;
-use App\Jobs\PullHelperImageJob;
-use App\Jobs\ServerStatusJob;
+use App\Jobs\CleanupOrphanedPreviewContainersJob;
+use App\Jobs\CleanupStaleMultiplexedConnections;
+use App\Jobs\CleanupUnusedSshKeys;
+use App\Jobs\PullChangelog;
+use App\Jobs\PullTemplatesFromCDN;
+use App\Jobs\ReconcileGithubRunnersJob;
+use App\Jobs\RegenerateSslCertJob;
+use App\Jobs\RevalidateUnusableS3StoragesJob;
+use App\Jobs\ScheduledJobManager;
+use App\Jobs\ServerManagerJob;
+use App\Jobs\UpdateCoolifyJob;
 use App\Models\InstanceSettings;
-use App\Models\ScheduledDatabaseBackup;
-use App\Models\ScheduledTask;
-use App\Models\Server;
-use App\Models\Team;
+use App\Services\ScheduledJobDeliveryService;
+use Cron\CronExpression;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
 class Kernel extends ConsoleKernel
 {
+    private const MAX_CDN_DELAY_SECONDS = 3600;
+
+    private Schedule $scheduleInstance;
+
+    private InstanceSettings $settings;
+
+    private string $updateCheckFrequency;
+
+    private string $instanceTimezone;
+
     protected function schedule(Schedule $schedule): void
     {
+        $this->scheduleInstance = $schedule;
+        $this->settings = instanceSettings();
+        $this->updateCheckFrequency = $this->settings->update_check_frequency ?: '0 * * * *';
+
+        $this->instanceTimezone = $this->settings->instance_timezone ?: config('app.timezone');
+
+        if (validate_timezone($this->instanceTimezone) === false) {
+            $this->instanceTimezone = config('app.timezone');
+        }
+
+        // Files are local to each cloud node; do not dispatch to the shared queue.
+        $this->scheduleInstance->call(fn () => app(CleanupUnusedSshKeys::class)->handle())
+            ->name('cleanup:ssh-keys')
+            ->hourly();
+
+        $this->scheduleInstance->call(fn () => app(CleanupStaleMultiplexedConnections::class)->handle())
+            ->name('cleanup:ssh-mux')
+            ->hourly()
+            ->when(fn () => config('constants.ssh.mux_enabled'));
+        // Every cloud node reads its own versions.json, so each node refreshes it (no onOneServer).
+        $this->scheduleInstance->call(fn () => refresh_versions_file())
+            ->name('versions:refresh-local')
+            ->hourly()
+            ->when(fn () => isCloud());
+        $this->scheduleInstance->command('cleanup:redis --clear-locks')->daily();
+        $this->scheduleInstance->call(fn () => app(ScheduledJobDeliveryService::class)->deleteOldOccurrences())
+            ->name('cleanup:scheduled-job-occurrences')
+            ->dailyAt('04:00')
+            ->onOneServer();
+        $this->scheduleInstance->command('cleanup:stucked-resources')
+            ->dailyAt('03:17')
+            ->onOneServer()
+            ->withoutOverlapping(60)
+            ->runInBackground();
+        $this->scheduleInstance->command('sanctum:prune-expired --hours=1')->hourly()->onOneServer();
+        $this->scheduleInstance->command('cleanup:database-import-uploads')->hourly()->onOneServer();
+        $this->scheduleInstance->command('dns:release-orphaned-records')
+            ->hourly()
+            ->onOneServer()
+            ->withoutOverlapping(60)
+            ->runInBackground();
+        $this->scheduleInstance->job(new ApiTokenExpirationWarningJob)->hourly()->onOneServer();
+        $this->scheduleInstance->job(new CheckMissingDatabaseBackupsJob)->hourly()->onOneServer();
+        $this->scheduleInstance->job(new CheckMissingVolumeBackupsJob)->hourly()->onOneServer();
+        $this->scheduleInstance->job(new RevalidateUnusableS3StoragesJob)->hourly()->onOneServer();
+        $this->scheduleInstance->job(new ReconcileGithubRunnersJob)->everyMinute()->onOneServer();
+
         if (isDev()) {
             // Instance Jobs
-            $schedule->command('horizon:snapshot')->everyMinute();
-            $schedule->job(new CleanupInstanceStuffsJob)->everyMinute()->onOneServer();
-            // $schedule->job(new CheckResaleLicenseJob)->hourly()->onOneServer();
+            $this->scheduleInstance->command('horizon:snapshot')->everyMinute();
+            $this->scheduleInstance->job(new CleanupInstanceStuffsJob)->everyMinute()->onOneServer();
+            $this->scheduleInstance->job(new CheckHelperImageJob)->everyTenMinutes()->onOneServer();
+
             // Server Jobs
-            $this->check_scheduled_backups($schedule);
-            $this->check_resources($schedule);
-            $this->check_scheduled_backups($schedule);
-            $this->pull_helper_image($schedule);
-            $this->check_scheduled_tasks($schedule);
+            $this->scheduleInstance->job(new ServerManagerJob)->everyMinute()->onOneServer();
+
+            // Scheduled Jobs (Backups & Tasks)
+            $this->scheduleScheduledJobManager();
+
+            $this->scheduleInstance->command('uploads:clear')->everyTwoMinutes();
+
         } else {
             // Instance Jobs
-            $schedule->command('horizon:snapshot')->everyFiveMinutes();
-            $schedule->command('cleanup:unreachable-servers')->daily();
+            $this->scheduleInstance->command('horizon:snapshot')->everyFiveMinutes();
+            $this->scheduleInstance->command('cleanup:unreachable-servers')->daily()->onOneServer();
 
-            $schedule->job(new CleanupInstanceStuffsJob)->everyTwoMinutes()->onOneServer();
-            // $schedule->job(new CheckResaleLicenseJob)->hourly()->onOneServer();
+            $this->scheduleInstance->job($this->withCdnDelay(new PullTemplatesFromCDN, $this->updateCheckFrequency))->cron($this->updateCheckFrequency)->timezone($this->instanceTimezone)->onOneServer();
+            $this->scheduleInstance->job($this->withCdnDelay(new PullChangelog, $this->updateCheckFrequency))->cron($this->updateCheckFrequency)->timezone($this->instanceTimezone)->onOneServer();
+
+            $this->scheduleInstance->job(new CleanupInstanceStuffsJob)->everyTwoMinutes()->onOneServer();
+            $this->scheduleUpdates();
 
             // Server Jobs
-            $this->instance_auto_update($schedule);
-            $this->check_scheduled_backups($schedule);
-            $this->check_resources($schedule);
-            $this->pull_helper_image($schedule);
-            $this->check_scheduled_tasks($schedule);
+            $this->scheduleInstance->job(new ServerManagerJob)->everyMinute()->onOneServer();
 
-            $schedule->command('cleanup:database --yes')->daily();
-        }
-    }
-    private function pull_helper_image($schedule)
-    {
-        $servers = Server::all()->where('settings.is_usable', true)->where('settings.is_reachable', true)->where('ip', '!=', '1.2.3.4');
-        foreach ($servers as $server) {
-            $schedule->job(new PullHelperImageJob($server))->everyTenMinutes()->onOneServer();
-        }
-    }
-    private function check_resources($schedule)
-    {
-        if (isCloud()) {
-            $servers = Server::all()->whereNotNull('team.subscription')->where('team.subscription.stripe_trial_already_ended', false)->where('ip', '!=', '1.2.3.4');
-            $own = Team::find(0)->servers;
-            $servers = $servers->merge($own);
-            $containerServers = $servers->where('settings.is_swarm_worker', false)->where('settings.is_build_server', false);
-        } else {
-            $servers = Server::all()->where('ip', '!=', '1.2.3.4');
-            $containerServers = $servers->where('settings.is_swarm_worker', false)->where('settings.is_build_server', false);
-        }
-        foreach ($containerServers as $server) {
-            $schedule->job(new ContainerStatusJob($server))->everyTwoMinutes()->onOneServer();
-            if ($server->isLogDrainEnabled()) {
-                $schedule->job(new CheckLogDrainContainerJob($server))->everyTwoMinutes()->onOneServer();
-            }
-        }
-        foreach ($servers as $server) {
-            $schedule->job(new ServerStatusJob($server))->everyTwoMinutes()->onOneServer();
-        }
-    }
-    private function instance_auto_update($schedule)
-    {
-        if (isDev()) {
-            return;
-        }
-        $settings = InstanceSettings::get();
-        if ($settings->is_auto_update_enabled) {
-            $schedule->job(new InstanceAutoUpdateJob)->everyTenMinutes()->onOneServer();
-        }
-    }
-    private function check_scheduled_backups($schedule)
-    {
-        $scheduled_backups = ScheduledDatabaseBackup::all();
-        if ($scheduled_backups->isEmpty()) {
-            return;
-        }
-        foreach ($scheduled_backups as $scheduled_backup) {
-            if (!$scheduled_backup->enabled) {
-                continue;
-            }
-            if (is_null(data_get($scheduled_backup, 'database'))) {
-                ray('database not found');
-                $scheduled_backup->delete();
-                continue;
-            }
+            // Scheduled Jobs (Backups & Tasks)
+            $this->scheduleScheduledJobManager();
 
-            if (isset(VALID_CRON_STRINGS[$scheduled_backup->frequency])) {
-                $scheduled_backup->frequency = VALID_CRON_STRINGS[$scheduled_backup->frequency];
-            }
-            $schedule->job(new DatabaseBackupJob(
-                backup: $scheduled_backup
-            ))->cron($scheduled_backup->frequency)->onOneServer();
+            $this->scheduleInstance->job(new RegenerateSslCertJob)->twiceDaily()->onOneServer();
+
+            $this->scheduleInstance->command('cleanup:database --yes')->daily();
+            $this->scheduleInstance->command('uploads:clear')->everyTwoMinutes();
+
+            // Cleanup orphaned PR preview containers daily
+            $this->scheduleInstance->job(new CleanupOrphanedPreviewContainersJob)->daily()->onOneServer();
         }
     }
 
-    private function check_scheduled_tasks($schedule)
+    /**
+     * Run the manager from the scheduler, not from a queue worker. A busy queue could delay it
+     * past the catch-up window, and then due backups and tasks would be skipped.
+     *
+     * Sequential mode runs all schedule types after each other in one process. Concurrent mode runs
+     * each type in its own process with its own overlap lock, so a slow type cannot make another type
+     * skip a run, but each process loads the full application every minute (more CPU and memory).
+     */
+    private function scheduleScheduledJobManager(): void
     {
-        $scheduled_tasks = ScheduledTask::all();
-        if ($scheduled_tasks->isEmpty()) {
-            return;
-        }
-        foreach ($scheduled_tasks as $scheduled_task) {
-            $service = $scheduled_task->service;
-            $application = $scheduled_task->application;
+        $commands = $this->scheduledJobsDispatchMode() === 'concurrent'
+            ? array_map(fn (string $type) => "scheduled:dispatch --type={$type}", array_keys(ScheduledJobManager::TYPES))
+            : ['scheduled:dispatch'];
 
-            if (!$application && !$service) {
-                ray('application/service attached to scheduled task does not exist');
-                $scheduled_task->delete();
-                continue;
-            }
-
-            if (isset(VALID_CRON_STRINGS[$scheduled_task->frequency])) {
-                $scheduled_task->frequency = VALID_CRON_STRINGS[$scheduled_task->frequency];
-            }
-            $schedule->job(new ScheduledTaskJob(
-                task: $scheduled_task
-            ))->cron($scheduled_task->frequency)->onOneServer();
+        foreach ($commands as $command) {
+            $this->scheduleInstance->command($command)
+                ->everyMinute()
+                ->onOneServer()
+                ->withoutOverlapping(5)
+                ->runInBackground();
         }
+    }
+
+    /**
+     * SCHEDULED_JOBS_DISPATCH_MODE, or the default: sequential on self-hosted, concurrent on Coolify Cloud.
+     */
+    private function scheduledJobsDispatchMode(): string
+    {
+        $mode = strtolower(trim((string) config('constants.coolify.scheduled_jobs_dispatch_mode')));
+
+        if (in_array($mode, ['sequential', 'concurrent'], true)) {
+            return $mode;
+        }
+
+        return isCloud() ? 'concurrent' : 'sequential';
+    }
+
+    private function scheduleUpdates(): void
+    {
+        $this->scheduleInstance->job($this->withCdnDelay(new CheckForUpdatesJob, $this->updateCheckFrequency))
+            ->cron($this->updateCheckFrequency)
+            ->timezone($this->instanceTimezone)
+            ->onOneServer();
+
+        if ($this->settings->is_auto_update_enabled) {
+            $autoUpdateFrequency = $this->settings->auto_update_frequency;
+            $this->scheduleInstance->job($this->withCdnDelay(new UpdateCoolifyJob, $autoUpdateFrequency))
+                ->cron($autoUpdateFrequency)
+                ->timezone($this->instanceTimezone)
+                ->onOneServer();
+        }
+    }
+
+    /**
+     * All instances share the same default cron, so without a delay they all request the CDN at the
+     * same second and Cloudflare rejects the burst (error 1200). Each instance gets a stable offset
+     * inside the cron interval (at most one hour), so the requests spread evenly and each instance
+     * still runs at a regular interval.
+     */
+    private function withCdnDelay(object $job, string $cron): object
+    {
+        return $job->delay(self::cdnDelaySeconds($cron));
+    }
+
+    public static function cdnDelaySeconds(string $cron): int
+    {
+        try {
+            $expression = new CronExpression($cron);
+            $nextRun = $expression->getNextRunDate();
+            $interval = $expression->getNextRunDate($nextRun)->getTimestamp() - $nextRun->getTimestamp();
+        } catch (\Throwable) {
+            $interval = self::MAX_CDN_DELAY_SECONDS;
+        }
+        $window = max(1, min($interval, self::MAX_CDN_DELAY_SECONDS));
+        $instanceId = (string) (config('app.id') ?: config('app.key'));
+
+        return crc32('cdn-delay:'.$instanceId) % $window;
     }
 
     protected function commands(): void
     {
-        $this->load(__DIR__ . '/Commands');
+        $this->load(__DIR__.'/Commands');
 
         require base_path('routes/console.php');
     }

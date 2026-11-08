@@ -54,7 +54,7 @@ return [
     'temporary_file_upload' => [
         'disk' => null,        // Example: 'local', 's3'              | Default: 'default'
         'rules' => [           // Example: ['file', 'mimes:png,jpg']  | Default: ['required', 'file', 'max:12288'] (12MB)
-            'file', 'max:256000'
+            'file', 'max:256000',
         ],
         'directory' => null,   // Example: 'tmp'                      | Default: 'livewire-tmp'
         'middleware' => null,  // Example: 'throttle:5,1'             | Default: 'throttle:60,1'
@@ -90,7 +90,7 @@ return [
     |
     */
 
-    'legacy_model_binding' => true,
+    'legacy_model_binding' => false,
 
     /*
     |---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ return [
 
     'navigate' => [
         'show_progress_bar' => true,
-        'progress_bar_color' => '#ffff00',
+        'progress_bar_color' => '#6b16ed',
     ],
 
     /*
@@ -146,4 +146,5 @@ return [
     */
 
     'pagination_theme' => 'tailwind',
+    'lazy_placeholder' => 'components.page-loading',
 ];

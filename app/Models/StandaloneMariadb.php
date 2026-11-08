@@ -2,51 +2,224 @@
 
 namespace App\Models;
 
+use App\Traits\Auditable;
+use App\Traits\ClearsGlobalSearchCache;
+use App\Traits\HasDatabaseHealthCheck;
+use App\Traits\HasImageScans;
+use App\Traits\HasLogRedactionSetting;
+use App\Traits\HasMetrics;
+use App\Traits\HasSafeStringAttribute;
+use App\Traits\HasSecretManager;
+use App\Traits\HasStars;
+use App\Traits\ScopedByAccessGrants;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class StandaloneMariadb extends BaseModel
 {
-    use HasFactory, SoftDeletes;
+    use Auditable, ClearsGlobalSearchCache, HasDatabaseHealthCheck, HasFactory, HasImageScans, HasLogRedactionSetting, HasMetrics, HasSafeStringAttribute, HasSecretManager, HasStars, ScopedByAccessGrants, SoftDeletes;
 
-    protected $guarded = [];
+    protected $fillable = [
+        'uuid',
+        'name',
+        'description',
+        'mariadb_root_password',
+        'mariadb_user',
+        'mariadb_password',
+        'mariadb_database',
+        'mariadb_conf',
+        'status',
+        'image',
+        'is_public',
+        'public_port',
+        'ports_mappings',
+        'limits_memory',
+        'limits_memory_swap',
+        'limits_memory_swappiness',
+        'limits_memory_reservation',
+        'limits_cpus',
+        'limits_cpuset',
+        'limits_cpu_shares',
+        'started_at',
+        'restart_count',
+        'last_restart_at',
+        'last_restart_type',
+        'last_online_at',
+        'public_port_timeout',
+        'enable_ssl',
+        'is_log_drain_enabled',
+        'custom_docker_run_options',
+        'destination_type',
+        'destination_id',
+        'environment_id',
+        'health_check_enabled',
+        'health_check_interval',
+        'health_check_timeout',
+        'health_check_retries',
+        'health_check_start_period',
+    ];
+
+    protected $appends = ['internal_db_url', 'external_db_url', 'database_type', 'server_status'];
+
+    /**
+     * Free-form configuration that can embed credentials. Only users who can
+     * update the database and `read:sensitive` tokens may read it.
+     */
+    public const CONFIGURATION_ATTRIBUTES = [
+        'mariadb_conf',
+        'custom_docker_run_options',
+    ];
+
+    /**
+     * Sensitive fields hidden by default in serialized output (toArray/toJson).
+     * API controllers should call makeVisible([...]) for callers with the
+     * `read:sensitive` or `root` token ability.
+     */
+    protected $hidden = [
+        'mariadb_password',
+        'mariadb_root_password',
+        ...self::CONFIGURATION_ATTRIBUTES,
+        'internal_db_url',
+        'external_db_url',
+    ];
+
     protected $casts = [
+        'include_coolify_default_variables' => 'boolean',
+        'health_check_enabled' => 'boolean',
+        'health_check_interval' => 'integer',
+        'health_check_timeout' => 'integer',
+        'health_check_retries' => 'integer',
+        'health_check_start_period' => 'integer',
         'mariadb_password' => 'encrypted',
+        'mariadb_root_password' => 'encrypted',
+        'public_port_timeout' => 'integer',
+        'restart_count' => 'integer',
+        'last_restart_at' => 'datetime',
+        'last_restart_type' => 'string',
     ];
 
     protected static function booted()
     {
         static::created(function ($database) {
             LocalPersistentVolume::create([
-                'name' => 'mariadb-data-' . $database->uuid,
+                'name' => 'mariadb-data-'.$database->uuid,
                 'mount_path' => '/var/lib/mysql',
                 'host_path' => null,
                 'resource_id' => $database->id,
                 'resource_type' => $database->getMorphClass(),
-                'is_readonly' => true
             ]);
         });
-        static::deleting(function ($database) {
-            $storages = $database->persistentStorages()->get();
-            $server = data_get($database, 'destination.server');
-            if ($server) {
-                foreach ($storages as $storage) {
-                    instant_remote_process(["docker volume rm -f $storage->name"], $server, false);
-                }
-            }
-            $database->scheduledBackups()->delete();
+        static::forceDeleting(function ($database) {
             $database->persistentStorages()->delete();
+            $database->scheduledBackups()->delete();
             $database->environment_variables()->delete();
             $database->tags()->detach();
         });
+        static::saving(function ($database) {
+            if ($database->isDirty('status')) {
+                $database->last_online_at = now();
+            }
+        });
     }
+
+    /**
+     * Get query builder for MariaDB databases owned by current team.
+     * If you need all databases without further query chaining, use ownedByCurrentTeamCached() instead.
+     */
+    public static function ownedByCurrentTeam()
+    {
+        return StandaloneMariadb::whereRelation('environment.project.team', 'id', currentTeam()->id)->orderBy('name');
+    }
+
+    /**
+     * Get all MariaDB databases owned by current team (cached for request duration).
+     */
+    public static function ownedByCurrentTeamCached()
+    {
+        return once(function () {
+            return StandaloneMariadb::ownedByCurrentTeam()->get();
+        });
+    }
+
+    protected function serverStatus(): Attribute
+    {
+        return Attribute::make(
+            get: function () {
+                return $this->destination->server->isFunctional();
+            }
+        );
+    }
+
+    public function isConfigurationChanged(bool $save = false)
+    {
+        $newConfigHash = $this->image.$this->ports_mappings.$this->mariadb_conf;
+        $newConfigHash .= $this->healthCheckConfigurationHash();
+        $newConfigHash .= json_encode($this->environment_variables()->get('value')->makeVisible('value')->sort());
+        $newConfigHash = md5($newConfigHash);
+        $oldConfigHash = data_get($this, 'config_hash');
+        if ($oldConfigHash === null) {
+            if ($save) {
+                $this->config_hash = $newConfigHash;
+                $this->save();
+            }
+
+            return true;
+        }
+        if ($oldConfigHash === $newConfigHash) {
+            return false;
+        } else {
+            if ($save) {
+                $this->config_hash = $newConfigHash;
+                $this->save();
+            }
+
+            return true;
+        }
+    }
+
+    public function isRunning()
+    {
+        return (bool) str($this->status)->contains('running');
+    }
+
+    public function isExited()
+    {
+        return (bool) str($this->status)->startsWith('exited');
+    }
+
+    public function workdir()
+    {
+        return database_configuration_dir()."/{$this->uuid}";
+    }
+
+    public function deleteConfigurations()
+    {
+        $server = data_get($this, 'destination.server');
+        $workdir = $this->workdir();
+        if (str($workdir)->endsWith($this->uuid)) {
+            instant_remote_process(['rm -rf '.$this->workdir()], $server, false);
+        }
+    }
+
+    public function deleteVolumes()
+    {
+        $persistentStorages = $this->persistentStorages()->get() ?? collect();
+        if ($persistentStorages->count() === 0) {
+            return;
+        }
+        $server = data_get($this, 'destination.server');
+        foreach ($persistentStorages as $storage) {
+            instant_remote_process(['docker volume rm -f '.escapeshellarg($storage->name)], $server, false);
+        }
+    }
+
     public function realStatus()
     {
-       return $this->getRawOriginal('status');
+        return $this->getRawOriginal('status');
     }
+
     public function status(): Attribute
     {
         return Attribute::make(
@@ -54,56 +227,73 @@ class StandaloneMariadb extends BaseModel
                 if (str($value)->contains('(')) {
                     $status = str($value)->before('(')->trim()->value();
                     $health = str($value)->after('(')->before(')')->trim()->value() ?? 'unhealthy';
-                } else if (str($value)->contains(':')) {
+                } elseif (str($value)->contains(':')) {
                     $status = str($value)->before(':')->trim()->value();
                     $health = str($value)->after(':')->trim()->value() ?? 'unhealthy';
                 } else {
                     $status = $value;
                     $health = 'unhealthy';
                 }
+
                 return "$status:$health";
             },
             get: function ($value) {
                 if (str($value)->contains('(')) {
                     $status = str($value)->before('(')->trim()->value();
                     $health = str($value)->after('(')->before(')')->trim()->value() ?? 'unhealthy';
-                } else if (str($value)->contains(':')) {
+                } elseif (str($value)->contains(':')) {
                     $status = str($value)->before(':')->trim()->value();
                     $health = str($value)->after(':')->trim()->value() ?? 'unhealthy';
                 } else {
                     $status = $value;
                     $health = 'unhealthy';
                 }
+
                 return "$status:$health";
             },
         );
     }
+
     public function tags()
     {
         return $this->morphToMany(Tag::class, 'taggable');
     }
-    public function project() {
+
+    public function project()
+    {
         return data_get($this, 'environment.project');
     }
+
     public function team()
     {
         return data_get($this, 'environment.project.team');
     }
+
     public function link()
     {
         if (data_get($this, 'environment.project.uuid')) {
             return route('project.database.configuration', [
                 'project_uuid' => data_get($this, 'environment.project.uuid'),
-                'environment_name' => data_get($this, 'environment.name'),
-                'database_uuid' => data_get($this, 'uuid')
+                'environment_uuid' => data_get($this, 'environment.uuid'),
+                'database_uuid' => data_get($this, 'uuid'),
             ]);
         }
+
         return null;
     }
+
     public function isLogDrainEnabled()
     {
         return data_get($this, 'is_log_drain_enabled', false);
     }
+
+    public function databaseType(): Attribute
+    {
+        return new Attribute(
+            get: fn () => $this->type(),
+        );
+    }
+
     public function type(): string
     {
         return 'standalone-mariadb';
@@ -112,7 +302,7 @@ class StandaloneMariadb extends BaseModel
     public function portsMappings(): Attribute
     {
         return Attribute::make(
-            set: fn ($value) => $value === "" ? null : $value,
+            set: fn ($value) => $value === '' ? null : $value,
         );
     }
 
@@ -126,13 +316,37 @@ class StandaloneMariadb extends BaseModel
         );
     }
 
-    public function get_db_url(bool $useInternal = false): string
+    protected function internalDbUrl(): Attribute
     {
-        if ($this->is_public && !$useInternal) {
-            return "mysql://{$this->mariadb_user}:{$this->mariadb_password}@{$this->destination->server->getIp}:{$this->public_port}/{$this->mariadb_database}";
-        } else {
-            return "mysql://{$this->mariadb_user}:{$this->mariadb_password}@{$this->uuid}:3306/{$this->mariadb_database}";
-        }
+        return new Attribute(
+            get: function () {
+                $encodedUser = rawurlencode($this->mariadb_user);
+                $encodedPass = rawurlencode($this->mariadb_password);
+
+                return "mysql://{$encodedUser}:{$encodedPass}@{$this->uuid}:3306/{$this->mariadb_database}";
+            },
+        );
+    }
+
+    protected function externalDbUrl(): Attribute
+    {
+        return new Attribute(
+            get: function () {
+                if ($this->is_public && $this->public_port) {
+                    $serverIp = $this->destination->server->getIp;
+                    if (empty($serverIp)) {
+                        return null;
+                    }
+                    $serverHost = formatHostForUrl($serverIp);
+                    $encodedUser = rawurlencode($this->mariadb_user);
+                    $encodedPass = rawurlencode($this->mariadb_password);
+
+                    return "mysql://{$encodedUser}:{$encodedPass}@{$serverHost}:{$this->public_port}/{$this->mariadb_database}";
+                }
+
+                return null;
+            }
+        );
     }
 
     public function environment()
@@ -145,19 +359,19 @@ class StandaloneMariadb extends BaseModel
         return $this->morphMany(LocalFileVolume::class, 'resource');
     }
 
-    public function destination()
+    public function destination(): MorphTo
     {
         return $this->morphTo();
     }
 
-    public function environment_variables(): HasMany
+    public function environment_variables()
     {
-        return $this->hasMany(EnvironmentVariable::class);
+        return $this->morphMany(EnvironmentVariable::class, 'resourceable');
     }
 
-    public function runtime_environment_variables(): HasMany
+    public function runtime_environment_variables()
     {
-        return $this->hasMany(EnvironmentVariable::class);
+        return $this->morphMany(EnvironmentVariable::class, 'resourceable');
     }
 
     public function persistentStorages()
@@ -168,5 +382,15 @@ class StandaloneMariadb extends BaseModel
     public function scheduledBackups()
     {
         return $this->morphMany(ScheduledDatabaseBackup::class, 'database');
+    }
+
+    public function sslCertificates()
+    {
+        return $this->morphMany(SslCertificate::class, 'resource');
+    }
+
+    public function isBackupSolutionAvailable()
+    {
+        return true;
     }
 }

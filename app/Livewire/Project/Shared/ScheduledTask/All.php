@@ -2,55 +2,91 @@
 
 namespace App\Livewire\Project\Shared\ScheduledTask;
 
-use App\Models\ScheduledTask;
+use Illuminate\Contracts\View\View;
+use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Support\Collection;
+use Livewire\Attributes\Locked;
+use Livewire\Attributes\On;
+use Livewire\Attributes\Url;
 use Livewire\Component;
-use Visus\Cuid2\Cuid2;
-use Illuminate\Support\Str;
 
 class All extends Component
 {
+    use AuthorizesRequests;
+
+    #[Locked]
     public $resource;
-    public string|null $modalId = null;
-    public ?string $variables = null;
+
+    #[Locked]
     public array $parameters;
-    protected $listeners = ['refreshTasks', 'saveScheduledTask' => 'submit'];
+
+    public Collection $containerNames;
+
+    public ?string $variables = null;
+
+    #[Url(as: 'task_uuid', except: '')]
+    public string $taskUuid = '';
+
+    public bool $taskModalOpen = false;
+
+    public function getListeners(): array
+    {
+        return [
+            'modalClosed' => 'closeTask',
+        ];
+    }
 
     public function mount()
     {
         $this->parameters = get_route_parameters();
-        $this->modalId = new Cuid2(7);
+        if ($this->resource->type() === 'service') {
+            $this->containerNames = $this->resource->applications()->pluck('name');
+            $this->containerNames = $this->containerNames->merge($this->resource->databases()->pluck('name'));
+        } elseif ($this->resource->type() === 'application') {
+            if ($this->resource->build_pack === 'dockercompose') {
+                $this->containerNames = collect($this->resource->composeServicesWithoutParse())->keys();
+            } else {
+                $this->containerNames = collect([]);
+            }
+        }
+
+        if ($this->taskUuid !== '') {
+            $this->openTask($this->taskUuid);
+        }
     }
+
+    public function openTask(string $taskUuid): void
+    {
+        $this->authorize('view', $this->resource);
+        $this->taskUuid = $this->resource->scheduled_tasks()->where('uuid', $taskUuid)->firstOrFail()->uuid;
+        $this->taskModalOpen = true;
+    }
+
+    public function closeTask(): void
+    {
+        $this->taskUuid = '';
+        $this->taskModalOpen = false;
+        $this->resource->refresh();
+    }
+
+    #[On('scheduledTaskDeleted')]
+    public function taskDeleted(): void
+    {
+        $this->closeTask();
+    }
+
+    #[On('refreshTasks')]
     public function refreshTasks()
     {
         $this->resource->refresh();
     }
 
-    public function submit($data)
+    public function render(): View
     {
-        try {
-            $task = new ScheduledTask();
-            $task->name = $data['name'];
-            $task->command = $data['command'];
-            $task->frequency = $data['frequency'];
-            $task->container = $data['container'];
-            $task->team_id = currentTeam()->id;
-
-            switch ($this->resource->type()) {
-                case 'application':
-                    $task->application_id = $this->resource->id;
-                    break;
-                case 'standalone-postgresql':
-                    $task->standalone_postgresql_id = $this->resource->id;
-                    break;
-                case 'service':
-                    $task->service_id = $this->resource->id;
-                    break;
-            }
-            $task->save();
-            $this->refreshTasks();
-            $this->dispatch('success', 'Scheduled task added.');
-        } catch (\Throwable $e) {
-            return handleError($e, $this);
-        }
+        return view('livewire.project.shared.scheduled-task.all', [
+            'selectedTask' => $this->taskUuid === ''
+                ? null
+                : $this->resource->scheduled_tasks()->where('uuid', $this->taskUuid)->first(),
+        ]);
     }
 }

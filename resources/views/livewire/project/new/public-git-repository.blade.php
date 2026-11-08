@@ -1,77 +1,121 @@
-<div>
-    <h1>Create a new Application</h1>
-    <div class="pb-4">Deploy any public Git repositories.</div>
-    <form class="flex flex-col gap-2" wire:submit='load_branch'>
-        <div class="flex flex-col gap-2">
-            <div class="flex flex-col">
-                <div class="flex items-end gap-2">
-                    <x-forms.input required id="repository_url" label="Repository URL" helper="{!! __('repository.url') !!}" />
-                    <x-forms.button type="submit">
+<div x-data x-init="$nextTick(() => { if ($refs.autofocusInput) $refs.autofocusInput.focus(); })"
+    class="mt-8 flex w-full max-w-none flex-col gap-6 lg:mt-3">
+    <form wire:submit="loadBranch">
+        <section class="application-settings-section">
+            <div class="application-settings-section-header">
+                <div>
+                    <h2>Public Git repository</h2>
+                    <p>Connect a public repository over HTTPS and inspect its default branch.</p>
+                </div>
+            </div>
+            <div class="application-settings-section-body">
+                <div class="flex flex-col gap-2 sm:flex-row sm:items-end">
+                    <div class="min-w-0 flex-1">
+                        <x-forms.input required id="repository_url" label="Repository URL"
+                            helper="{!! __('repository.url') !!}" placeholder="https://github.com/owner/repository"
+                            autofocus />
+                    </div>
+                    <x-forms.button type="submit" class="w-full justify-center sm:w-auto"
+                        wire:loading.attr="disabled" wire:target="loadBranch" :showLoadingIndicator="false">
+                        <svg wire:loading wire:target="loadBranch" class="size-3.5 shrink-0 animate-spin"
+                            viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <circle class="opacity-25" cx="12" cy="12" r="9" stroke="currentColor"
+                                stroke-width="3" />
+                            <path class="opacity-75" d="M21 12a9 9 0 0 0-9-9" stroke="currentColor"
+                                stroke-width="3" stroke-linecap="round" />
+                        </svg>
                         Check repository
                     </x-forms.button>
                 </div>
-                @if (!$branch_found)
-                    <div class="px-2 pt-4">
-                        <div class="flex gap-1">
-                            <div>Public:</div>
-                            <div class='text-helper'>https://..</div>
-                        </div>
-                        <div class="flex gap-1">
-                            <div>Private:</div>
-                            <div class='text-helper'>git@..</div>
-                        </div>
-                        <div class="flex gap-1">
-                            <div>Preselect branch (eg: main):</div>
-                            <div class='text-helper'>https://github.com/coollabsio/coolify-examples/tree/main</div>
-                        </div>
-                        <div>
-                            For example application deployments, checkout <a class="dark:text-white underline"
-                                href="https://github.com/coollabsio/coolify-examples/" target="_blank">Coolify
-                                Examples</a>.
-                        </div>
-                @endif
-                @if ($branch_found)
+                <p class="mt-2 text-xs text-neutral-500 dark:text-fg-dim">
+                    Need a sample? Browse
+                    <a class="font-medium text-coollabs hover:underline dark:text-brand-light"
+                        href="https://github.com/coollabsio/coolify-examples/" target="_blank">
+                        Coolify Examples
+                    </a>.
+                </p>
+            </div>
+        </section>
+    </form>
+
+    @if ($branchFound)
+        <form wire:submit="submit">
+            <section class="application-settings-section">
+                <div class="application-settings-section-header">
+                    <div>
+                        <h2>Build configuration</h2>
+                        <p>Choose how Coolify builds and runs this repository.</p>
+                    </div>
+                    <x-forms.button type="submit" isHighlighted>Continue</x-forms.button>
+                </div>
+                <div class="application-settings-section-body space-y-5">
                     @if ($rate_limit_remaining && $rate_limit_reset)
-                        <div class="flex gap-2 py-2">
-                            <div>Rate Limit</div>
-                            <x-helper
-                                helper="Rate limit remaining: {{ $rate_limit_remaining }}<br>Rate limit reset at: {{ $rate_limit_reset }} UTC" />
-                        </div>
+                        <x-callout type="info" title="Git provider rate limit">
+                            {{ $rate_limit_remaining }} requests remain. The limit resets at
+                            {{ $rate_limit_reset }} UTC.
+                        </x-callout>
                     @endif
-                    <div class="flex flex-col gap-2 pb-6">
-                        <div class="flex gap-2">
-                            @if ($git_source === 'other')
-                                <x-forms.input id="git_branch" label="Branch"
-                                    helper="You can select other branches after configuration is done." />
-                            @else
-                                <x-forms.input disabled id="git_branch" label="Branch"
-                                    helper="You can select other branches after configuration is done." />
-                            @endif
-                            <x-forms.select wire:model.live="build_pack" label="Build Pack" required>
-                                <option value="nixpacks">Nixpacks</option>
-                                <option value="static">Static</option>
-                                <option value="dockerfile">Dockerfile</option>
-                                <option value="dockercompose">Docker Compose</option>
-                            </x-forms.select>
-                            @if ($is_static)
-                                <x-forms.input id="publish_directory" label="Publish Directory"
-                                    helper="If there is a build process involved (like Svelte, React, Next, etc..), please specify the output directory for the build assets." />
-                            @endif
-                        </div>
+
+                    @include('livewire.project.new.partials.smart-scan-summary')
+
+                    <div class="grid gap-4 sm:grid-cols-2">
+                        <x-forms.input id="git_branch" label="Branch"
+                            :disabled="$git_source !== 'other'"
+                            helper="You can choose another branch after the application is created." />
+                        <x-forms.listbox id="build_pack" label="Build pack" required live :options="[
+                            ['value' => 'railpack', 'label' => 'Railpack'],
+                            ['value' => 'nixpacks', 'label' => 'Nixpacks (deprecated)'],
+                            ['value' => 'static', 'label' => 'Static'],
+                            ['value' => 'dockerfile', 'label' => 'Dockerfile'],
+                            ['value' => 'dockercompose', 'label' => 'Docker Compose'],
+                        ]" />
                         @if ($show_is_static)
-                            <x-forms.input type="number" id="port" label="Port" :readonly="$is_static || $build_pack === 'static'"
-                                helper="The port your application listens on." />
-                            <div class="w-52">
-                                <x-forms.checkbox instantSave id="is_static" label="Is it a static site?"
-                                    helper="If your application is a static site or the final build assets should be served as a static site, enable this." />
-                            </div>
+                            <x-forms.listbox id="isStatic" label="Output type" onChange="instantSave"
+                                :options="[
+                                    ['value' => false, 'label' => 'Web application'],
+                                    ['value' => true, 'label' => 'Static site'],
+                                ]" />
+                            <x-forms.input type="number" id="port" label="Port"
+                                :readonly="$isStatic || $build_pack === 'static'"
+                                helper="Port the application listens on." />
+                        @endif
+                        @if ($isStatic)
+                            <x-forms.input id="publish_directory" label="Publish directory"
+                                helper="Directory containing the generated static assets." />
                         @endif
                     </div>
-                    <x-forms.button wire:click.prevent='submit'>
-                        Continue
-                    </x-forms.button>
-                @endif
-            </div>
-        </div>
-    </form>
+
+                    @if ($build_pack === 'nixpacks')
+                        <x-nixpacks-deprecated-callout />
+                    @endif
+
+                    {{-- Dockerfile: pick a detected file or type a path --}}
+                    @if ($build_pack === 'dockerfile')
+                        <x-forms.listbox id="selectedDockerfile" label="Dockerfile" live searchable allowCustom placeholder="/Dockerfile"
+                            emptyText="No Dockerfiles detected. Type a path in the search field."
+                            searchPlaceholder="Search or type a path…"
+                            helper="Select a detected Dockerfile, or type a path relative to the base directory."
+                            :options="collect($detectedDockerfiles)->map(fn ($file) => ['value' => $file, 'label' => $file])->all()" />
+                    @endif
+
+                    {{-- Docker Compose file selector: pick a detected file or type a path --}}
+                    @if ($build_pack === 'dockercompose' && count($detectedDockerComposeFiles) > 0)
+                        <x-forms.listbox id="selectedDockerComposeFile" label="Docker Compose File" live searchable allowCustom
+                            searchPlaceholder="Search or type a path…"
+                            helper="Select a detected Docker Compose file, or type a path relative to the base directory."
+                            :options="collect($detectedDockerComposeFiles)->map(fn ($file) => ['value' => $file, 'label' => $file])->all()" />
+                    @endif
+
+                    @if ($build_pack === 'dockercompose')
+                        <x-forms.repository-paths class="sm:grid-cols-2" base="base_directory"
+                            file="docker_compose_location" fileLabel="Compose file" compose
+                            defaultFile="/docker-compose.yaml" />
+                    @else
+                        <x-forms.input id="base_directory" label="Base directory" placeholder="/"
+                            helper="Repository directory used as the build root." />
+                    @endif
+                </div>
+            </section>
+        </form>
+    @endif
 </div>

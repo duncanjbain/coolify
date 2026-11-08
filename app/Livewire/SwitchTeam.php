@@ -8,9 +8,17 @@ use Livewire\Component;
 class SwitchTeam extends Component
 {
     public string $selectedTeamId = 'default';
-    public function mount() {
+
+    protected $listeners = [
+        'team-avatar-updated' => '$refresh',
+        'team-updated' => '$refresh',
+    ];
+
+    public function mount()
+    {
         $this->selectedTeamId = auth()->user()->currentTeam()->id;
     }
+
     public function updatedSelectedTeamId()
     {
         $this->switch_to($this->selectedTeamId);
@@ -18,14 +26,15 @@ class SwitchTeam extends Component
 
     public function switch_to($team_id)
     {
-        if (!auth()->user()->teams->contains($team_id)) {
+        if (! auth()->user()->teams->contains($team_id)) {
             return;
         }
         $team_to_switch_to = Team::find($team_id);
-        if (!$team_to_switch_to) {
+        if (! $team_to_switch_to) {
             return;
         }
         refreshSession($team_to_switch_to);
-        return redirect(request()->header('Referer'));
+
+        return redirect()->route('dashboard');
     }
 }

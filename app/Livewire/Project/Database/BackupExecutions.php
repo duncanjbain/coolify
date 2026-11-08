@@ -2,69 +2,247 @@
 
 namespace App\Livewire\Project\Database;
 
-use Illuminate\Support\Facades\Storage;
+use App\Models\ScheduledDatabaseBackup;
+use App\Models\ServiceDatabase;
+use App\Traits\ListensToTeamChannel;
+use App\Traits\PreparesBackupDownloads;
+use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Support\Collection;
 use Livewire\Component;
 
 class BackupExecutions extends Component
 {
-    public $backup;
-    public $executions = [];
+    use AuthorizesRequests;
+    use ListensToTeamChannel;
+    use PreparesBackupDownloads;
+
+    public ?ScheduledDatabaseBackup $backup = null;
+
+    public $database;
+
+    public ?Collection $executions;
+
+    public int $executions_count = 0;
+
+    public int $skip = 0;
+
+    public int $defaultTake = 10;
+
+    public bool $showNext = false;
+
+    public bool $showPrev = false;
+
+    public int $currentPage = 1;
+
     public $setDeletableBackup;
-    public function getListeners()
+
+    public $delete_backup_s3 = false;
+
+    public $delete_backup_sftp = false;
+
+    public function getListeners(): array
     {
-        $userId = auth()->user()->id;
-        return [
-            "echo-private:team.{$userId},BackupCreated" => 'refreshBackupExecutions',
-            "refreshBackupExecutions",
-            "deleteBackup"
-        ];
+        return $this->teamChannelListeners([
+            'BackupCreated' => 'refreshBackupExecutions',
+        ]);
     }
 
-    public function deleteBackup($exeuctionId)
-    {
-        $execution = $this->backup->executions()->where('id', $exeuctionId)->first();
-        if (is_null($execution)) {
-            $this->dispatch('error', 'Backup execution not found.');
-            return;
-        }
-        if ($execution->scheduledDatabaseBackup->database->getMorphClass() === 'App\Models\ServiceDatabase') {
-            delete_backup_locally($execution->filename, $execution->scheduledDatabaseBackup->database->service->destination->server);
-        } else {
-            delete_backup_locally($execution->filename, $execution->scheduledDatabaseBackup->database->destination->server);
-        }
-        $execution->delete();
-        $this->dispatch('success', 'Backup deleted.');
-        $this->refreshBackupExecutions();
-    }
-    public function download($exeuctionId)
+    public function cleanupFailed()
     {
         try {
-            $execution = $this->backup->executions()->where('id', $exeuctionId)->first();
-            if (is_null($execution)) {
-                $this->dispatch('error', 'Backup execution not found.');
-                return;
+            $this->authorize('delete', $this->database);
+            if ($this->backup) {
+                $this->backup->executions()->where('status', 'failed')->delete();
+                $this->refreshBackupExecutions();
+                $this->dispatch('success', 'Failed backups cleaned up.');
             }
-            $filename = data_get($execution, 'filename');
-            if ($execution->scheduledDatabaseBackup->database->getMorphClass() === 'App\Models\ServiceDatabase') {
-                $server = $execution->scheduledDatabaseBackup->database->service->destination->server;
-            } else {
-                $server = $execution->scheduledDatabaseBackup->database->destination->server;
-            }
-            $privateKeyLocation = savePrivateKeyToFs($server);
-            $disk = Storage::build([
-                'driver' => 'sftp',
-                'host' => $server->ip,
-                'port' => $server->port,
-                'username' => $server->user,
-                'privateKey' => $privateKeyLocation,
-            ]);
-            return $disk->download($filename);
         } catch (\Throwable $e) {
             return handleError($e, $this);
         }
     }
+
+    public function cleanupDeleted()
+    {
+        try {
+            $this->authorize('delete', $this->database);
+            if ($this->backup) {
+                $deletedCount = $this->backup->executions()->where('local_storage_deleted', true)->count();
+                if ($deletedCount > 0) {
+                    $this->backup->executions()->where('local_storage_deleted', true)->delete();
+                    $this->refreshBackupExecutions();
+                    $this->dispatch('success', "Cleaned up {$deletedCount} backup entries deleted from local storage.");
+                } else {
+                    $this->dispatch('info', 'No backup entries found that are deleted from local storage.');
+                }
+            }
+        } catch (\Throwable $e) {
+            return handleError($e, $this);
+        }
+    }
+
+    public function deleteBackup($executionId, $password, $selectedActions = [])
+    {
+        try {
+            $this->authorize('delete', $this->database);
+        } catch (\Throwable $e) {
+            return handleError($e, $this);
+        }
+
+        if (! verifyPasswordConfirmation($password, $this)) {
+            return 'The provided password is incorrect.';
+        }
+
+        $execution = $this->backup->executions()->where('id', $executionId)->first();
+        if (is_null($execution)) {
+            $this->dispatch('error', 'Backup execution not found.');
+
+            return;
+        }
+
+        try {
+            $deleteFromS3 = in_array('delete_backup_s3', $selectedActions, true);
+
+            if ($execution->filename && ! $execution->local_storage_deleted) {
+                $server = $this->backup->server();
+                if (! $server) {
+                    throw new \RuntimeException('The backup server is unavailable.');
+                }
+
+                deleteBackupsLocally($execution->filename, $server, throwError: true);
+            }
+
+            if ($deleteFromS3) {
+                $execution->deleteS3Copies();
+            }
+
+            $execution->delete();
+            $this->delete_backup_s3 = false;
+            $this->dispatch('success', 'Backup deleted.');
+            $this->refreshBackupExecutions();
+        } catch (\Exception $e) {
+            $this->dispatch('error', 'Failed to delete backup: '.$e->getMessage());
+
+            return false;
+        }
+
+        return true;
+    }
+
+    public function download_file($executionId): void
+    {
+        try {
+            $this->authorize('manageBackups', $this->database);
+            $execution = $this->backup->executions()->whereKey($executionId)->first();
+            if (! $execution) {
+                $this->dispatch('error', 'Backup execution not found.');
+
+                return;
+            }
+
+            $this->prepareBackupDownload(
+                $execution->local_storage_deleted ? null : $this->server(),
+                $execution->filename,
+                route('download.backup', $execution->id),
+            );
+        } catch (\Throwable $e) {
+            handleError($e, $this);
+        }
+    }
+
     public function refreshBackupExecutions(): void
     {
-        $this->executions = $this->backup->executions()->get()->sortByDesc('created_at');
+        $this->loadExecutions();
+    }
+
+    public function reloadExecutions()
+    {
+        $this->loadExecutions();
+    }
+
+    public function previousPage(?int $take = null)
+    {
+        if ($take) {
+            $this->skip = $this->skip - $take;
+        }
+        $this->skip = $this->skip - $this->defaultTake;
+        if ($this->skip < 0) {
+            $this->showPrev = false;
+            $this->skip = 0;
+        }
+        $this->updateCurrentPage();
+        $this->loadExecutions();
+    }
+
+    public function nextPage(?int $take = null)
+    {
+        if ($take) {
+            $this->skip = $this->skip + $take;
+        }
+        $this->showPrev = true;
+        $this->updateCurrentPage();
+        $this->loadExecutions();
+    }
+
+    private function loadExecutions()
+    {
+        if ($this->backup && $this->backup->exists) {
+            ['executions' => $executions, 'count' => $count] = $this->backup->executionsPaginated($this->skip, $this->defaultTake);
+            $this->executions = $executions;
+            $this->executions_count = $count;
+        } else {
+            $this->executions = collect([]);
+            $this->executions_count = 0;
+        }
+        $this->showMore();
+    }
+
+    private function showMore()
+    {
+        if ($this->executions->count() !== 0) {
+            $this->showNext = true;
+            if ($this->executions->count() < $this->defaultTake) {
+                $this->showNext = false;
+            }
+
+            return;
+        }
+    }
+
+    private function updateCurrentPage()
+    {
+        $this->currentPage = intval($this->skip / $this->defaultTake) + 1;
+    }
+
+    public function mount(ScheduledDatabaseBackup $backup)
+    {
+        $this->backup = $backup;
+        $this->database = $backup->database;
+        $this->updateCurrentPage();
+        $this->loadExecutions();
+    }
+
+    public function server()
+    {
+        if ($this->database) {
+            $server = null;
+
+            if ($this->database instanceof ServiceDatabase) {
+                $server = $this->database->service->destination->server;
+            } elseif ($this->database->destination && $this->database->destination->server) {
+                $server = $this->database->destination->server;
+            }
+            if ($server) {
+                return $server;
+            }
+        }
+
+        return null;
+    }
+
+    public function render()
+    {
+        return view('livewire.project.database.backup-executions', [
+            's3Downloads' => $this->s3BackupDownloadsEnabled(),
+        ]);
     }
 }

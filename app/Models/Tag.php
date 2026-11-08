@@ -2,28 +2,44 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Casts\Attribute;
+use App\Traits\Auditable;
+use App\Traits\HasSafeStringAttribute;
+use OpenApi\Attributes as OA;
 
+#[OA\Schema(
+    description: 'Tag model',
+    type: 'object',
+    properties: [
+        new OA\Property(property: 'uuid', type: 'string'),
+        new OA\Property(property: 'name', type: 'string'),
+        new OA\Property(property: 'created_at', type: 'string'),
+        new OA\Property(property: 'updated_at', type: 'string'),
+    ]
+)]
 class Tag extends BaseModel
 {
-    protected $guarded = [];
+    use Auditable, HasSafeStringAttribute;
 
+    protected $fillable = [
+        'name',
+        'team_id',
+    ];
 
-    public function name(): Attribute
+    protected function customizeName($value)
     {
-        return Attribute::make(
-            get: fn ($value) => strtolower($value),
-            set: fn ($value) => strtolower($value)
-        );
+        return strtolower($value);
     }
-    static public function ownedByCurrentTeam()
+
+    public static function ownedByCurrentTeam()
     {
         return Tag::whereTeamId(currentTeam()->id)->orderBy('name');
     }
+
     public function applications()
     {
         return $this->morphedByMany(Application::class, 'taggable');
     }
+
     public function services()
     {
         return $this->morphedByMany(Service::class, 'taggable');

@@ -1,260 +1,442 @@
 <?php
 
-use App\Actions\CoolifyTask\PrepareCoolifyTask;
-use App\Data\CoolifyTaskArgs;
 use App\Enums\ActivityTypes;
+use App\Enums\ProcessStatus;
+use App\Helpers\SshMultiplexingHelper;
+use App\Helpers\SshRetryHandler;
+use App\Jobs\CoolifyTask;
 use App\Models\Application;
 use App\Models\ApplicationDeploymentQueue;
 use App\Models\PrivateKey;
 use App\Models\Server;
-use App\Notifications\Server\Revived;
-use App\Notifications\Server\Unreachable;
+use App\Services\Security\SensitiveDataRedactor;
+use App\Support\RemoteProcessCommand;
 use Carbon\Carbon;
+use Illuminate\Contracts\Process\ProcessResult;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Process\Exceptions\ProcessTimedOutException;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Process;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 use Spatie\Activitylog\Contracts\Activity;
 
 function remote_process(
-    Collection|array   $command,
-    Server  $server,
-    ?string  $type = null,
+    Collection|array $command,
+    Server $server,
+    ?string $type = null,
     ?string $type_uuid = null,
-    ?Model  $model = null,
-    bool    $ignore_errors = false,
+    ?Model $model = null,
+    bool $ignore_errors = false,
     $callEventOnFinish = null,
-    $callEventData = null
+    $callEventData = null,
+    array $properties = [],
+    ?int $timeout = null,
+    string $queue = 'high',
 ): Activity {
-    if (is_null($type)) {
-        $type = ActivityTypes::INLINE->value;
+    $type = $type ?? ActivityTypes::INLINE->value;
+    $command = $command instanceof Collection ? $command->toArray() : $command;
+
+    if ($server->isNonRoot()) {
+        $command = parseCommandsByLineForSudo(collect($command), $server);
     }
-    if ($command instanceof Collection) {
-        $command = $command->toArray();
-    }
+
     $command_string = implode("\n", $command);
-    if (auth()->user()) {
-        $teams = auth()->user()->teams->pluck('id');
-        if (!$teams->contains($server->team_id) && !$teams->contains(0)) {
-            throw new \Exception("User is not part of the team that owns this server");
+
+    if (Auth::check()) {
+        $teams = Auth::user()->teams->pluck('id');
+        if (! $teams->contains($server->team_id) && ! $teams->contains(0)) {
+            throw new Exception('User is not part of the team that owns this server');
         }
     }
-    return resolve(PrepareCoolifyTask::class, [
-        'remoteProcessArgs' => new CoolifyTaskArgs(
-            server_uuid: $server->uuid,
-            command: <<<EOT
-                {$command_string}
-                EOT,
-            type: $type,
-            type_uuid: $type_uuid,
-            model: $model,
-            ignore_errors: $ignore_errors,
-            call_event_on_finish: $callEventOnFinish,
-            call_event_data: $callEventData,
-        ),
-    ])();
-}
 
-function savePrivateKeyToFs(Server $server)
-{
-    if (data_get($server, 'privateKey.private_key') === null) {
-        throw new \Exception("Server {$server->name} does not have a private key");
+    SshMultiplexingHelper::ensureMultiplexedConnection($server);
+
+    $properties = [
+        ...$properties,
+        'server_uuid' => $server->uuid,
+        ...RemoteProcessCommand::properties($command_string),
+        'type' => $type,
+        'type_uuid' => $type_uuid,
+        'status' => ProcessStatus::QUEUED->value,
+        'team_id' => $server->team_id,
+    ];
+
+    $activityLog = activity()
+        ->withProperties($properties)
+        ->event($type);
+
+    if ($model) {
+        $activityLog->performedOn($model);
     }
-    $sshKeyFileLocation = "id.root@{$server->uuid}";
-    Storage::disk('ssh-keys')->makeDirectory('.');
-    Storage::disk('ssh-mux')->makeDirectory('.');
-    Storage::disk('ssh-keys')->put($sshKeyFileLocation, $server->privateKey->private_key);
-    $location = '/var/www/html/storage/app/ssh/keys/' . $sshKeyFileLocation;
-    return $location;
+
+    $activity = $activityLog->log('[]');
+
+    dispatch(new CoolifyTask(
+        activity: $activity,
+        ignore_errors: $ignore_errors,
+        call_event_on_finish: $callEventOnFinish,
+        call_event_data: $callEventData,
+        timeout: $timeout,
+        queue: $queue,
+    ));
+
+    $activity->refresh();
+
+    return $activity;
 }
 
-function generateScpCommand(Server $server, string $source, string $dest)
-{
-    $user = $server->user;
-    $port = $server->port;
-    $privateKeyLocation = savePrivateKeyToFs($server);
-    $timeout = config('constants.ssh.command_timeout');
-    $connectionTimeout = config('constants.ssh.connection_timeout');
-    $serverInterval = config('constants.ssh.server_interval');
-
-    $scp_command = "timeout $timeout scp ";
-    $scp_command .= "-i {$privateKeyLocation} "
-        . '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '
-        . '-o PasswordAuthentication=no '
-        . "-o ConnectTimeout=$connectionTimeout "
-        . "-o ServerAliveInterval=$serverInterval "
-        . '-o RequestTTY=no '
-        . '-o LogLevel=ERROR '
-        . "-P {$port} "
-        . "{$source} "
-        . "{$user}@{$server->ip}:{$dest}";
-
-    return $scp_command;
-}
 function instant_scp(string $source, string $dest, Server $server, $throwError = true)
 {
-    $timeout = config('constants.ssh.command_timeout');
-    $scp_command = generateScpCommand($server, $source, $dest);
-    $process = Process::timeout($timeout)->run($scp_command);
-    $output = trim($process->output());
-    $exitCode = $process->exitCode();
-    if ($exitCode !== 0) {
-        if (!$throwError) {
-            return null;
-        }
-        return excludeCertainErrors($process->errorOutput(), $exitCode);
-    }
-    if ($output === 'null') {
-        $output = null;
-    }
-    return $output;
-}
-function generateSshCommand(Server $server, string $command)
-{
-    if ($server->settings->force_disabled) {
-        throw new \RuntimeException('Server is disabled.');
-    }
-    $user = $server->user;
-    $port = $server->port;
-    $privateKeyLocation = savePrivateKeyToFs($server);
-    $timeout = config('constants.ssh.command_timeout');
-    $connectionTimeout = config('constants.ssh.connection_timeout');
-    $serverInterval = config('constants.ssh.server_interval');
+    return SshRetryHandler::retry(
+        function () use ($source, $dest, $server) {
+            $scp_command = SshMultiplexingHelper::generateScpCommand($server, $source, $dest);
+            $process = Process::timeout(config('constants.ssh.command_timeout'))->run($scp_command);
+            SshMultiplexingHelper::noticeHostKeyMismatch($server, $process);
 
-    $delimiter = 'EOF-COOLIFY-SSH';
-    $ssh_command = "timeout $timeout ssh ";
+            $output = trim($process->output());
+            $exitCode = $process->exitCode();
 
-    if (config('coolify.mux_enabled') && config('coolify.is_windows_docker_desktop') == false) {
-        $ssh_command .= '-o ControlMaster=auto -o ControlPersist=1m -o ControlPath=/var/www/html/storage/app/ssh/mux/%h_%p_%r ';
-    }
-    if (data_get($server, 'settings.is_cloudflare_tunnel')) {
-        $ssh_command .= '-o ProxyCommand="/usr/local/bin/cloudflared access ssh --hostname %h" ';
-    }
-    $command = "PATH=\$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host/usr/local/sbin:/host/usr/local/bin:/host/usr/sbin:/host/usr/bin:/host/sbin:/host/bin && $command";
-    $ssh_command .= "-i {$privateKeyLocation} "
-        . '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '
-        . '-o PasswordAuthentication=no '
-        . "-o ConnectTimeout=$connectionTimeout "
-        . "-o ServerAliveInterval=$serverInterval "
-        . '-o RequestTTY=no '
-        . '-o LogLevel=ERROR '
-        . "-p {$port} "
-        . "{$user}@{$server->ip} "
-        . " 'bash -se' << \\$delimiter" . PHP_EOL
-        . $command . PHP_EOL
-        . $delimiter;
-    // ray($ssh_command);
-    return $ssh_command;
+            if ($exitCode !== 0) {
+                excludeCertainErrors($process->errorOutput(), $exitCode);
+            }
+
+            return $output === 'null' ? null : $output;
+        },
+        [
+            'server' => $server->ip,
+            'source' => $source,
+            'dest' => $dest,
+            'function' => 'instant_scp',
+        ],
+        $throwError
+    );
 }
-function instant_remote_process(Collection|array $command, Server $server, $throwError = true)
+
+/**
+ * Download a remote file from a managed server onto the Coolify host via SCP.
+ */
+function instant_scp_from_server(string $remoteSource, string $localDest, Server $server, $throwError = true)
 {
-    $timeout = config('constants.ssh.command_timeout');
-    if ($command instanceof Collection) {
-        $command = $command->toArray();
+    return SshRetryHandler::retry(
+        function () use ($remoteSource, $localDest, $server) {
+            $scp_command = SshMultiplexingHelper::generateScpDownloadCommand($server, $remoteSource, $localDest);
+            $process = Process::timeout(config('constants.ssh.command_timeout'))->run($scp_command);
+            SshMultiplexingHelper::noticeHostKeyMismatch($server, $process);
+
+            $output = trim($process->output());
+            $exitCode = $process->exitCode();
+
+            if ($exitCode !== 0) {
+                excludeCertainErrors($process->errorOutput(), $exitCode);
+            }
+
+            return $output === 'null' ? null : $output;
+        },
+        [
+            'server' => $server->ip,
+            'source' => $remoteSource,
+            'dest' => $localDest,
+            'function' => 'instant_scp_from_server',
+        ],
+        $throwError
+    );
+}
+
+/**
+ * Runs an SSH command. The timeout error of the process contains the complete command line, and with it
+ * the secrets of the remote script (database passwords, S3 keys), so it is replaced with a generic error.
+ * Exit code 124 (as from `timeout`) marks it as a remote command failure, so the batch is not run again.
+ */
+function runSshProcess(string $sshCommand, int $timeout, ?string $input = null): ProcessResult
+{
+    try {
+        return Process::timeout($timeout)->input($input)->run($sshCommand);
+    } catch (ProcessTimedOutException) {
+        throw new RuntimeException("The command on the server timed out after {$timeout} seconds.", 124);
+    }
+}
+
+/**
+ * Write content to a file on a server through SSH stdin. The content never becomes part of a command
+ * line, so it is not limited by the 128 KiB per-argument limit of Linux. A non-root SSH user writes
+ * with `sudo tee` because Coolify directories such as /data/coolify are root-only.
+ */
+function instant_remote_write_file(Server $server, string $path, string $content, bool $throwError = true): void
+{
+    $remoteCommand = ($server->isNonRoot() ? 'sudo ' : '').'tee '.escapeshellarg($path).' > /dev/null';
+    $timeout = (int) config('constants.ssh.command_timeout');
+
+    SshRetryHandler::retry(
+        function () use ($server, $remoteCommand, $content, $timeout) {
+            $sshCommand = SshMultiplexingHelper::generateSshStdinCommand($server, $remoteCommand, commandTimeout: $timeout);
+            $process = runSshProcess($sshCommand, $timeout, $content);
+            SshMultiplexingHelper::noticeHostKeyMismatch($server, $process);
+
+            if ($process->exitCode() !== 0) {
+                excludeCertainErrors($process->errorOutput(), $process->exitCode());
+            }
+        },
+        [
+            'server' => $server->ip,
+            'dest' => $path,
+            'function' => 'instant_remote_write_file',
+        ],
+        $throwError
+    );
+}
+
+function instant_remote_process_with_timeout(Collection|array $command, Server $server, bool $throwError = true, bool $no_sudo = false): ?string
+{
+    $command = $command instanceof Collection ? $command->toArray() : $command;
+    if ($server->isNonRoot() && ! $no_sudo) {
+        $command = parseCommandsByLineForSudo(collect($command), $server);
     }
     $command_string = implode("\n", $command);
-    $ssh_command = generateSshCommand($server, $command_string);
-    $process = Process::timeout($timeout)->run($ssh_command);
-    $output = trim($process->output());
-    $exitCode = $process->exitCode();
-    if ($exitCode !== 0) {
-        if (!$throwError) {
-            return null;
-        }
-        return excludeCertainErrors($process->errorOutput(), $exitCode);
-    }
-    if ($output === 'null') {
-        $output = null;
-    }
-    return $output;
+
+    return SshRetryHandler::retry(
+        function () use ($server, $command_string) {
+            $sshCommand = SshMultiplexingHelper::generateSshBatchCommand($server);
+            $process = runSshProcess($sshCommand, 30, SshMultiplexingHelper::sshBatchInput($command_string));
+            SshMultiplexingHelper::noticeHostKeyMismatch($server, $process);
+
+            $output = trim($process->output());
+            $exitCode = $process->exitCode();
+
+            if ($exitCode !== 0) {
+                excludeCertainErrors($process->errorOutput(), $exitCode);
+            }
+
+            // Sanitize output to ensure valid UTF-8 encoding
+            $output = $output === 'null' ? null : sanitize_utf8_text($output);
+
+            return $output;
+        },
+        [
+            'server' => $server->ip,
+            'command_preview' => substr($command_string, 0, 100),
+            'function' => 'instant_remote_process_with_timeout',
+        ],
+        $throwError
+    );
 }
-function excludeCertainErrors(string $errorOutput, ?int $exitCode = null)
+
+function instant_remote_process(Collection|array $command, Server $server, bool $throwError = true, bool $no_sudo = false, ?int $timeout = null, bool $disableMultiplexing = false, ?int $maxAttempts = null): ?string
 {
-    $ignoredErrors = collect([
-        'Permission denied (publickey',
-        'Could not resolve hostname',
-    ]);
-    $ignored = false;
-    foreach ($ignoredErrors as $ignoredError) {
-        if (Str::contains($errorOutput, $ignoredError)) {
-            $ignored = true;
-            break;
-        }
+    $command = $command instanceof Collection ? $command->toArray() : $command;
+
+    if ($server->isNonRoot() && ! $no_sudo) {
+        $command = parseCommandsByLineForSudo(collect($command), $server);
     }
-    if ($ignored) {
-        // TODO: Create new exception and disable in sentry
-        throw new \RuntimeException($errorOutput, $exitCode);
-    }
-    throw new \RuntimeException($errorOutput, $exitCode);
+    $command_string = implode("\n", $command);
+    $effectiveTimeout = $timeout ?? config('constants.ssh.command_timeout');
+
+    return SshRetryHandler::retry(
+        function () use ($server, $command_string, $effectiveTimeout, $disableMultiplexing) {
+            $sshCommand = SshMultiplexingHelper::generateSshBatchCommand($server, $disableMultiplexing, (int) $effectiveTimeout);
+            $process = runSshProcess($sshCommand, (int) $effectiveTimeout, SshMultiplexingHelper::sshBatchInput($command_string));
+            SshMultiplexingHelper::noticeHostKeyMismatch($server, $process);
+
+            $output = trim($process->output());
+            $exitCode = $process->exitCode();
+
+            if ($exitCode !== 0) {
+                excludeCertainErrors($process->errorOutput(), $exitCode);
+            }
+
+            // Sanitize output to ensure valid UTF-8 encoding
+            $output = $output === 'null' ? null : sanitize_utf8_text($output);
+
+            return $output;
+        },
+        [
+            'server' => $server->ip,
+            'command_preview' => substr($command_string, 0, 100),
+            'function' => 'instant_remote_process',
+        ],
+        $throwError,
+        $maxAttempts
+    );
 }
-function decode_remote_command_output(?ApplicationDeploymentQueue $application_deployment_queue = null): Collection
+
+/**
+ * Throws the remote command error.
+ */
+function excludeCertainErrors(string $errorOutput, ?int $exitCode = null): never
 {
-    $application = Application::find(data_get($application_deployment_queue, 'application_id'));
-    $is_debug_enabled = data_get($application, 'settings.is_debug_enabled');
+    $errorMessage = trim($errorOutput);
+    if (empty($errorMessage)) {
+        $errorMessage = "SSH command failed with exit code: $exitCode";
+    }
+    if ($exitCode === 255 && str_contains($errorMessage, 'Host key verification failed')) {
+        $errorMessage = SshMultiplexingHelper::HOST_KEY_CHANGED_MESSAGE;
+    }
+    $errorMessage = trim(SshMultiplexingHelper::stripHostKeyChangedWarning($errorMessage)) ?: "SSH command failed with exit code: $exitCode";
+
+    throw new RuntimeException($errorMessage, $exitCode);
+}
+
+function decode_remote_command_output(?ApplicationDeploymentQueue $application_deployment_queue = null, bool $includeAll = false): Collection
+{
     if (is_null($application_deployment_queue)) {
         return collect([]);
     }
-    // ray(data_get($application_deployment_queue, 'logs'));
+    $application = Application::find(data_get($application_deployment_queue, 'application_id'));
+    $is_debug_enabled = data_get($application, 'settings.is_debug_enabled');
+    $serverTimezone = getServerTimezone(data_get($application, 'destination.server'));
+
+    // Members should never see debug logs, even if an admin enabled debug mode
+    if ($is_debug_enabled && auth()->check()) {
+        $teamId = $application?->team()?->id;
+        if (is_null($teamId) || ! auth()->user()->isAdminOfTeam($teamId)) {
+            $is_debug_enabled = false;
+        }
+    }
+
+    $logs = data_get($application_deployment_queue, 'logs');
+    if (empty($logs)) {
+        return collect([]);
+    }
+
     try {
         $decoded = json_decode(
-            data_get($application_deployment_queue, 'logs'),
+            $logs,
             associative: true,
             flags: JSON_THROW_ON_ERROR
         );
-    } catch (\JsonException $exception) {
+    } catch (JsonException $e) {
+        // If JSON decoding fails, try to clean up the logs and retry
+        try {
+            // Ensure valid UTF-8 encoding
+            $cleaned_logs = sanitize_utf8_text($logs);
+            $decoded = json_decode(
+                $cleaned_logs,
+                associative: true,
+                flags: JSON_THROW_ON_ERROR
+            );
+        } catch (JsonException $e) {
+            // If it still fails, return empty collection to prevent crashes
+            return collect([]);
+        }
+    }
+
+    if (! is_array($decoded)) {
         return collect([]);
     }
-    // ray($decoded );
+
+    $seenCommands = collect();
     $formatted = collect($decoded);
-    if (!$is_debug_enabled) {
+    if (! $is_debug_enabled && ! $includeAll) {
         $formatted = $formatted->filter(fn ($i) => $i['hidden'] === false ?? false);
     }
-    $formatted = $formatted
+
+    return $formatted
         ->sortBy(fn ($i) => data_get($i, 'order'))
-        ->map(function ($i) {
-            data_set($i, 'timestamp', Carbon::parse(data_get($i, 'timestamp'))->format('Y-M-d H:i:s.u'));
+        ->map(function ($i) use ($serverTimezone) {
+            $timestamp = Carbon::parse(data_get($i, 'timestamp'));
+            try {
+                $timestamp->setTimezone($serverTimezone);
+            } catch (Exception) {
+                $timestamp->setTimezone('UTC');
+            }
+            data_set($i, 'timestamp', $timestamp->format('Y-M-d H:i:s'));
+
             return $i;
-        });
-    return $formatted;
+        })
+        ->reduce(function ($deploymentLogLines, $logItem) use ($seenCommands) {
+            $command = data_get($logItem, 'command');
+            $isStderr = data_get($logItem, 'type') === 'stderr';
+            $isNewCommand = ! is_null($command) && ! $seenCommands->first(function ($seenCommand) use ($logItem) {
+                return data_get($seenCommand, 'command') === data_get($logItem, 'command') && data_get($seenCommand, 'batch') === data_get($logItem, 'batch');
+            });
+
+            if ($isNewCommand) {
+                $deploymentLogLines->push([
+                    'line' => $command,
+                    'timestamp' => data_get($logItem, 'timestamp'),
+                    'stderr' => $isStderr,
+                    'hidden' => data_get($logItem, 'hidden'),
+                    'command' => true,
+                ]);
+
+                $seenCommands->push([
+                    'command' => $command,
+                    'batch' => data_get($logItem, 'batch'),
+                ]);
+            }
+
+            $lines = explode(PHP_EOL, data_get($logItem, 'output'));
+
+            foreach ($lines as $line) {
+                $deploymentLogLines->push([
+                    'line' => $line,
+                    'timestamp' => data_get($logItem, 'timestamp'),
+                    'stderr' => $isStderr,
+                    'hidden' => data_get($logItem, 'hidden'),
+                ]);
+            }
+
+            return $deploymentLogLines;
+        }, collect());
 }
+
 function remove_iip($text)
 {
-    $text = preg_replace('/x-access-token:.*?(?=@)/', "x-access-token:" . REDACTED, $text);
-    return preg_replace('/\x1b\[[0-9;]*m/', '', $text);
+    return app(SensitiveDataRedactor::class)->redactText((string) $text);
 }
+
+/**
+ * Sanitizes text to ensure it contains valid UTF-8 encoding.
+ *
+ * This function is crucial for preventing "Malformed UTF-8 characters" errors
+ * that can occur when Docker build output contains binary data mixed with text,
+ * especially during image processing or builds with many assets.
+ *
+ * @param  string|null  $text  The text to sanitize
+ * @return string Valid UTF-8 encoded text
+ */
+function sanitize_utf8_text(?string $text): string
+{
+    if (empty($text)) {
+        return '';
+    }
+
+    // Convert to UTF-8, replacing invalid sequences
+    $sanitized = mb_convert_encoding($text, 'UTF-8', 'UTF-8');
+
+    // Additional fallback: use SUBSTITUTE flag to replace invalid sequences with substitution character
+    if (! mb_check_encoding($sanitized, 'UTF-8')) {
+        $sanitized = mb_convert_encoding($text, 'UTF-8', mb_detect_encoding($text, mb_detect_order(), true) ?: 'UTF-8');
+    }
+
+    return $sanitized;
+}
+
 function refresh_server_connection(?PrivateKey $private_key = null)
 {
     if (is_null($private_key)) {
         return;
     }
     foreach ($private_key->servers as $server) {
-        Storage::disk('ssh-mux')->delete($server->muxFilename());
+        SshMultiplexingHelper::removeMuxFile($server);
     }
 }
 
 function checkRequiredCommands(Server $server)
 {
-    $commands = collect(["jq", "jc"]);
+    $commands = collect(['jq', 'jc']);
     foreach ($commands as $command) {
         $commandFound = instant_remote_process(["docker run --rm --privileged --net=host --pid=host --ipc=host --volume /:/host busybox chroot /host bash -c 'command -v {$command}'"], $server, false);
         if ($commandFound) {
-            ray($command . ' found');
             continue;
         }
         try {
             instant_remote_process(["docker run --rm --privileged --net=host --pid=host --ipc=host --volume /:/host busybox chroot /host bash -c 'apt update && apt install -y {$command}'"], $server);
-        } catch (\Throwable $e) {
-            ray('could not install ' . $command);
-            ray($e);
+        } catch (Throwable) {
             break;
         }
         $commandFound = instant_remote_process(["docker run --rm --privileged --net=host --pid=host --ipc=host --volume /:/host busybox chroot /host bash -c 'command -v {$command}'"], $server, false);
-        if ($commandFound) {
-            ray($command . ' found');
-            continue;
+        if (! $commandFound) {
+            break;
         }
-        ray('could not install ' . $command);
-        break;
     }
 }

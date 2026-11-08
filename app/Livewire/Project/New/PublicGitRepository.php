@@ -3,77 +3,122 @@
 namespace App\Livewire\Project\New;
 
 use App\Models\Application;
+use App\Models\GiteaApp;
 use App\Models\GithubApp;
 use App\Models\GitlabApp;
 use App\Models\Project;
-use App\Models\StandaloneDocker;
-use App\Models\SwarmDocker;
+use App\Rules\ValidGitBranch;
+use App\Rules\ValidGitRepositoryUrl;
+use App\Support\ValidationPatterns;
+use App\Traits\HasRepositoryDetection;
 use Carbon\Carbon;
+use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Livewire\Component;
 use Spatie\Url\Url;
 
 class PublicGitRepository extends Component
 {
+    use AuthorizesRequests;
+    use HasRepositoryDetection;
+
     public string $repository_url;
+
     public int $port = 3000;
+
     public string $type;
+
     public $parameters;
+
     public $query;
-    public bool $branch_found = false;
-    public string $selected_branch = 'main';
-    public bool $is_static = false;
-    public string|null $publish_directory = null;
+
+    public bool $branchFound = false;
+
+    public string $selectedBranch = 'main';
+
+    public bool $isStatic = false;
+
+    public ?string $publish_directory = null;
+
+    // In case of docker compose
+    public string $base_directory = '/';
+
+    public ?string $docker_compose_location = '/docker-compose.yaml';
+    // End of docker compose
+
     public string $git_branch = 'main';
+
     public int $rate_limit_remaining = 0;
+
     public $rate_limit_reset = 0;
+
     private object $repository_url_parsed;
-    public GithubApp|GitlabApp|string $git_source = 'other';
+
+    public GithubApp|GitlabApp|GiteaApp|string $git_source = 'other';
+
     public string $git_host;
+
     public string $git_repository;
-    public $build_pack = 'nixpacks';
+
+    public $build_pack = 'railpack';
+
     public bool $show_is_static = true;
 
-    protected $rules = [
-        'repository_url' => 'required|url',
-        'port' => 'required|numeric',
-        'is_static' => 'required|boolean',
-        'publish_directory' => 'nullable|string',
-        'build_pack' => 'required|string',
-    ];
+    public bool $new_compose_services = false;
+
+    protected function rules()
+    {
+        return [
+            'repository_url' => ['required', 'string', new ValidGitRepositoryUrl],
+            'port' => 'required|numeric',
+            'isStatic' => 'required|boolean',
+            'publish_directory' => 'nullable|string',
+            'build_pack' => 'required|string',
+            'base_directory' => ValidationPatterns::directoryPathRules(),
+            'docker_compose_location' => ValidationPatterns::filePathRules(),
+            'git_branch' => ['required', 'string', new ValidGitBranch],
+        ];
+    }
+
     protected $validationAttributes = [
         'repository_url' => 'repository',
         'port' => 'port',
-        'is_static' => 'static',
+        'isStatic' => 'static',
         'publish_directory' => 'publish directory',
         'build_pack' => 'build pack',
+        'base_directory' => 'base directory',
+        'docker_compose_location' => 'docker compose location',
     ];
 
     public function mount()
     {
         if (isDev()) {
-            $this->repository_url = 'https://github.com/coollabsio/coolify-examples';
+            $this->repository_url = 'https://github.com/coollabsio/coolify-examples/tree/main';
             $this->port = 3000;
         }
         $this->parameters = get_route_parameters();
         $this->query = request()->query();
     }
+
     public function updatedBuildPack()
     {
-        if ($this->build_pack === 'nixpacks') {
+        if ($this->build_pack === 'nixpacks' || $this->build_pack === 'railpack') {
             $this->show_is_static = true;
-            $this->port = 3000;
-        } else if ($this->build_pack === 'static') {
+            if (! $this->isStatic) {
+                $this->port = 3000;
+            }
+        } elseif ($this->build_pack === 'static') {
             $this->show_is_static = false;
-            $this->is_static = false;
+            $this->isStatic = false;
             $this->port = 80;
         } else {
             $this->show_is_static = false;
-            $this->is_static = false;
+            $this->isStatic = false;
         }
     }
+
     public function instantSave()
     {
-        if ($this->is_static) {
+        if ($this->isStatic) {
             $this->port = 80;
             $this->publish_directory = '/dist';
         } else {
@@ -82,30 +127,60 @@ class PublicGitRepository extends Component
         }
         $this->dispatch('success', 'Application settings updated!');
     }
-    public function load_any_git()
-    {
-        $this->branch_found = true;
-    }
-    public function load_branch()
+
+    public function loadBranch()
     {
         try {
-            $this->validate([
-                'repository_url' => 'required|url'
+            // Validate repository URL
+            $validator = validator(['repository_url' => $this->repository_url], [
+                'repository_url' => ['required', 'string', new ValidGitRepositoryUrl],
             ]);
+
+            if ($validator->fails()) {
+                throw new \RuntimeException('Invalid repository URL: '.$validator->errors()->first('repository_url'));
+            }
+
+            $httpsRepositoryUrl = sshGitUrlToHttps($this->repository_url);
+            if (is_string($httpsRepositoryUrl)) {
+                $this->repository_url = $httpsRepositoryUrl;
+            }
+            if (
+                (str($this->repository_url)->startsWith('https://') ||
+                    str($this->repository_url)->startsWith('http://')) &&
+                ! str($this->repository_url)->endsWith('.git') &&
+                (! str($this->repository_url)->contains('github.com') ||
+                    ! str($this->repository_url)->contains('git.sr.ht')) &&
+                    ! str($this->repository_url)->contains('tangled')
+            ) {
+
+                $this->repository_url = $this->repository_url.'.git';
+            }
+            if (str($this->repository_url)->contains('github.com') && str($this->repository_url)->endsWith('.git')) {
+                $this->repository_url = str($this->repository_url)->beforeLast('.git')->value();
+            }
+
         } catch (\Throwable $e) {
             return handleError($e, $this);
         }
         try {
-            $this->branch_found = false;
-            $this->get_git_source();
-            $this->get_branch();
-            $this->selected_branch = $this->git_branch;
+            $this->branchFound = false;
+            $this->getGitSource();
+            $this->getBranch();
+            if (str($this->repository_url)->contains('tangled')) {
+                $this->git_branch = 'master';
+            }
+            $this->selectedBranch = $this->git_branch;
+
         } catch (\Throwable $e) {
-            ray($e->getMessage());
-            if (!$this->branch_found && $this->git_branch == 'main') {
+            if ($this->rate_limit_remaining == 0) {
+                $this->selectedBranch = $this->git_branch;
+                $this->branchFound = true;
+
+            } elseif (! $this->branchFound && $this->git_branch === 'main') {
                 try {
                     $this->git_branch = 'master';
-                    $this->get_branch();
+                    $this->getBranch();
+
                 } catch (\Throwable $e) {
                     return handleError($e, $this);
                 }
@@ -113,75 +188,151 @@ class PublicGitRepository extends Component
                 return handleError($e, $this);
             }
         }
+        if ($this->branchFound) {
+            $this->selectedBranch = $this->git_branch;
+            $this->detectRepository();
+        }
     }
 
-    private function get_git_source()
+    protected function applicationForDetection(): Application
     {
+        return $this->unsavedApplicationForDetection(
+            $this->git_repository,
+            $this->git_branch,
+            $this->git_source instanceof GithubApp || $this->git_source instanceof GitlabApp || $this->git_source instanceof GiteaApp ? $this->git_source : null,
+        );
+    }
+
+    private function getGitSource()
+    {
+        $this->git_branch = 'main';
+        $this->base_directory = '/';
+
+        // Validate repository URL before parsing
+        $validator = validator(['repository_url' => $this->repository_url], [
+            'repository_url' => ['required', 'string', new ValidGitRepositoryUrl],
+        ]);
+
+        if ($validator->fails()) {
+            throw new \RuntimeException('Invalid repository URL: '.$validator->errors()->first('repository_url'));
+        }
+
         $this->repository_url_parsed = Url::fromString($this->repository_url);
         $this->git_host = $this->repository_url_parsed->getHost();
-        $this->git_repository = $this->repository_url_parsed->getSegment(1) . '/' . $this->repository_url_parsed->getSegment(2);
-        $this->git_branch = $this->repository_url_parsed->getSegment(4) ?? 'main';
+        $this->git_repository = $this->repository_url_parsed->getSegment(1).'/'.$this->repository_url_parsed->getSegment(2);
 
-        if ($this->git_host == 'github.com') {
-            $this->git_source = GithubApp::where('name', 'Public GitHub')->first();
+        if ($this->repository_url_parsed->getSegment(3) === 'tree') {
+            $path = str($this->repository_url_parsed->getPath())->trim('/');
+            $this->git_branch = str($path)->after('tree/')->value();
+            $this->base_directory = '/';
+        } else {
+            $this->git_branch = 'main';
+        }
+        if ($this->git_host === 'github.com') {
+            $this->git_source = GithubApp::query()->whereKey(0)->where('is_public', true)->first();
+
             return;
         }
         $this->git_repository = $this->repository_url;
         $this->git_source = 'other';
     }
 
-    private function get_branch()
+    private function getBranch()
     {
         if ($this->git_source === 'other') {
-            $this->branch_found = true;
+            $this->branchFound = true;
+
             return;
         }
-        if ($this->git_source->getMorphClass() === 'App\Models\GithubApp') {
-            ['rate_limit_remaining' => $this->rate_limit_remaining, 'rate_limit_reset' => $this->rate_limit_reset] = githubApi(source: $this->git_source, endpoint: "/repos/{$this->git_repository}/branches/{$this->git_branch}");
-            $this->rate_limit_reset = Carbon::parse((int)$this->rate_limit_reset)->format('Y-M-d H:i:s');
-            $this->branch_found = true;
+        if ($this->git_source->getMorphClass() === GithubApp::class) {
+            $originalBranch = $this->git_branch;
+            $branchToTry = $originalBranch;
+
+            while (true) {
+                try {
+                    $encodedBranch = urlencode($branchToTry);
+                    ['rate_limit_remaining' => $this->rate_limit_remaining, 'rate_limit_reset' => $this->rate_limit_reset] = githubApi(source: $this->git_source, endpoint: "/repos/{$this->git_repository}/branches/{$encodedBranch}");
+                    $this->rate_limit_reset = Carbon::parse((int) $this->rate_limit_reset)->format('Y-M-d H:i:s');
+                    $this->git_branch = $branchToTry;
+
+                    $remaining = str($originalBranch)->after($branchToTry)->trim('/')->value();
+                    $this->base_directory = filled($remaining) ? '/'.$remaining : '/';
+
+                    $this->branchFound = true;
+
+                    return;
+                } catch (\Throwable $e) {
+                    if (str_contains($branchToTry, '/')) {
+                        $branchToTry = str($branchToTry)->beforeLast('/')->value();
+
+                        continue;
+                    }
+
+                    throw $e;
+                }
+            }
         }
     }
 
     public function submit()
     {
         try {
-            $this->validate();
-            $destination_uuid = $this->query['destination'];
-            $project_uuid = $this->parameters['project_uuid'];
-            $environment_name = $this->parameters['environment_name'];
+            $this->base_directory = ValidationPatterns::normalizeDirectoryPath($this->base_directory);
 
-            $destination = StandaloneDocker::where('uuid', $destination_uuid)->first();
-            if (!$destination) {
-                $destination = SwarmDocker::where('uuid', $destination_uuid)->first();
+            $this->validate();
+
+            // Additional validation for git repository and branch
+            if ($this->git_source === 'other') {
+                // For 'other' sources, git_repository contains the full URL
+                $validator = validator(['git_repository' => $this->git_repository], [
+                    'git_repository' => ['required', 'string', new ValidGitRepositoryUrl],
+                ]);
+
+                if ($validator->fails()) {
+                    throw new \RuntimeException('Invalid repository URL: '.$validator->errors()->first('git_repository'));
+                }
             }
-            if (!$destination) {
-                throw new \Exception('Destination not found. What?!');
+
+            $branchValidator = validator(['git_branch' => $this->git_branch], [
+                'git_branch' => ['required', 'string', new ValidGitBranch],
+            ]);
+
+            if ($branchValidator->fails()) {
+                throw new \RuntimeException('Invalid branch: '.$branchValidator->errors()->first('git_branch'));
+            }
+
+            $destination_uuid = $this->query['destination'] ?? null;
+            $project_uuid = $this->parameters['project_uuid'];
+            $environment_uuid = $this->parameters['environment_uuid'];
+
+            $destination = find_resource_destination_for_current_team($destination_uuid);
+            if (! $destination) {
+                throw new \Exception('Destination not found.');
             }
             $destination_class = $destination->getMorphClass();
 
-            $project = Project::where('uuid', $project_uuid)->first();
-            $environment = $project->load(['environments'])->environments->where('name', $environment_name)->first();
+            $project = Project::ownedByCurrentTeam()->where('uuid', $project_uuid)->firstOrFail();
+            $environment = $project->environments()->where('uuid', $environment_uuid)->firstOrFail();
+            $this->authorize('create', [Application::class, $environment]);
 
             if ($this->git_source === 'other') {
                 $application_init = [
                     'name' => generate_random_name(),
                     'git_repository' => $this->git_repository,
                     'git_branch' => $this->git_branch,
-                    'build_pack' => 'nixpacks',
                     'ports_exposes' => $this->port,
                     'publish_directory' => $this->publish_directory,
                     'environment_id' => $environment->id,
                     'destination_id' => $destination->id,
                     'destination_type' => $destination_class,
                     'build_pack' => $this->build_pack,
+                    'base_directory' => $this->base_directory,
                 ];
             } else {
                 $application_init = [
                     'name' => generate_application_name($this->git_repository, $this->git_branch),
                     'git_repository' => $this->git_repository,
                     'git_branch' => $this->git_branch,
-                    'build_pack' => 'nixpacks',
                     'ports_exposes' => $this->port,
                     'publish_directory' => $this->publish_directory,
                     'environment_id' => $environment->id,
@@ -190,22 +341,33 @@ class PublicGitRepository extends Component
                     'source_id' => $this->git_source->id,
                     'source_type' => $this->git_source->getMorphClass(),
                     'build_pack' => $this->build_pack,
+                    'base_directory' => $this->base_directory,
                 ];
             }
 
+            if ($this->build_pack === 'dockerfile' || $this->build_pack === 'dockerimage') {
+                $application_init['health_check_enabled'] = false;
+            }
+            if ($this->build_pack === 'dockerfile' && $dockerfileLocation = $this->selectedDockerfileLocation()) {
+                $application_init['dockerfile_location'] = $dockerfileLocation;
+            }
+            if ($this->build_pack === 'dockercompose') {
+                $application_init['docker_compose_location'] = $this->docker_compose_location;
+            }
+            $application = new Application($application_init);
+            $application->save();
 
-            $application = Application::create($application_init);
-
-            $application->settings->is_static = $this->is_static;
+            $application->settings->is_static = $this->isStatic;
             $application->settings->save();
-
-            $fqdn = generateFqdn($destination->server, $application->uuid);
+            $fqdn = generateUrl(server: $destination->server, random: $application->uuid);
             $application->fqdn = $fqdn;
             $application->save();
 
+            $this->importDetectedEnvironmentVariables($application);
+
             return redirect()->route('project.application.configuration', [
                 'application_uuid' => $application->uuid,
-                'environment_name' => $environment->name,
+                'environment_uuid' => $environment->uuid,
                 'project_uuid' => $project->uuid,
             ]);
         } catch (\Throwable $e) {

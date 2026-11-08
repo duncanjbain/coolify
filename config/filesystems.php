@@ -35,9 +35,9 @@ return [
             'throw' => false,
         ],
 
-        'webhooks-during-maintenance' => [
+        'images' => [
             'driver' => 'local',
-            'root' => storage_path('app/webhooks-during-maintenance'),
+            'root' => storage_path('app/images'),
             'visibility' => 'private',
             'throw' => false,
         ],
@@ -45,7 +45,7 @@ return [
         'public' => [
             'driver' => 'local',
             'root' => storage_path('app/public'),
-            'url' => env('APP_URL') . '/storage',
+            'url' => env('APP_URL').'/storage',
             'visibility' => 'public',
             'throw' => false,
         ],
